@@ -44,7 +44,7 @@ class RateLimiter:
 
     async def _get_global_limit(self) -> tuple[int, str]:
         """获取全局限制设置。"""
-        global_enabled_str = await self._config_manager.get("globalRateLimitEnabled", "true")
+        global_enabled_str = await self._config_manager.get("globalRateLimitEnabled", "false")
         if global_enabled_str.lower() != 'true':
             return 0, "hour"  # 0 表示无限制
 
