@@ -26,7 +26,7 @@ export const ApiLogs = () => {
       width: 200,
       render: (_, record) => {
         return (
-          <div>{dayjs(record.access_time).format('YYYY-MM-DD HH:mm:ss')}</div>
+          <div>{dayjs(record.accessTime).format('YYYY-MM-DD HH:mm:ss')}</div>
         )
       },
     },

@@ -20,6 +20,7 @@ from .webhook_manager import WebhookManager
 from .scheduler import SchedulerManager
 from .config import settings
 from . import crud, security
+from . import migration
 from .log_manager import setup_logging
 from .rate_limiter import RateLimiter
 
@@ -40,6 +41,9 @@ async def lifespan(app: FastAPI):
     # init_db_tables 现在处理数据库创建、引擎和会话工厂的创建
     await init_db_tables(app)
     session_factory = app.state.db_session_factory
+
+    # 新增：在所有管理器初始化之前，执行数据库迁移
+    await migration.run_db_migration(session_factory)
 
     # 新增：在启动时清理任何未完成的任务
     async with session_factory() as session:
@@ -85,6 +89,9 @@ async def lifespan(app: FastAPI):
         'gamerUserAgent': ('', '用于访问巴哈姆特动画疯的User-Agent。'),
         "rate_limit_global_limit": ("50", ""),
         "rate_limit_global_period_seconds": ("3600", ""),
+        # 全局过滤
+        'search_result_global_blacklist_cn': (r'特典|预告|广告|菜单|花絮|特辑|速看|资讯|彩蛋|直拍|直播回顾|片头|片尾|幕后|映像|番外篇|纪录片|访谈|番外|短片|加更|走心|解忧|纯享|解读|揭秘|赏析', '用于过滤搜索结果标题的全局中文黑名单(正则表达式)。'),
+        'search_result_global_blacklist_eng': (r'NC|OP|ED|SP|OVA|OAD|CM|PV|MV|BDMenu|Menu|Bonus|Recap|Teaser|Trailer|Preview|CD|Disc|Scan|Sample|Logo|Info|EDPV|SongSpot|BDSpot', '用于过滤搜索结果标题的全局英文黑名单(正则表达式)。'),
     }
     await app.state.config_manager.register_defaults(default_configs)
 
@@ -119,7 +126,31 @@ async def lifespan(app: FastAPI):
     app.state.cleanup_task = asyncio.create_task(cleanup_task(app))
     app.state.scheduler_manager = SchedulerManager(session_factory, app.state.task_manager, app.state.scraper_manager, app.state.rate_limiter, app.state.metadata_manager)
     await app.state.scheduler_manager.start()
-
+    
+    # --- 前端服务 (生产环境) ---
+    # 在所有API路由注册完毕后，再挂载前端服务，以确保API路由优先匹配。
+    # 在生产环境中，我们需要挂载 Vite 构建后的静态资源目录
+    # 并且需要一个“捕获所有”的路由来始终提供 index.html，以支持前端路由。
+    if settings.environment == "development":
+        # 开发环境：所有非API请求都重定向到Vite开发服务器
+        @app.get("/{full_path:path}", include_in_schema=False)
+        async def serve_react_app_dev(request: Request, full_path: str):
+            base_url = f"http://{settings.client.host}:{settings.client.port}"
+            return RedirectResponse(url=f"{base_url}/{full_path}" if full_path else base_url)
+    else:
+        # 生产环境：显式挂载静态资源目录
+        app.mount("/assets", StaticFiles(directory="web/dist/assets"), name="assets")
+        # 修正：挂载前端的静态图片 (如 logo)，使其指向正确的 'web/dist/images' 目录
+        app.mount("/images", StaticFiles(directory="web/dist/images"), name="images")
+        # dist挂载
+        app.mount("/dist", StaticFiles(directory="web/dist"), name="dist")
+        # 挂载用户缓存的图片 (如海报)
+        app.mount("/data/images", StaticFiles(directory="config/image"), name="cached_images")
+        # 然后，为所有其他路径提供 index.html 以支持前端路由
+        @app.get("/{full_path:path}", include_in_schema=False)
+        async def serve_spa(request: Request, full_path: str):
+            return FileResponse("web/dist/index.html")
+    
     yield
     
     # --- Shutdown Logic ---
@@ -237,37 +268,16 @@ async def cleanup_task(app: FastAPI):
         except Exception as e:
             logging.getLogger(__name__).error(f"缓存清理任务出错: {e}")
 
-# 包含所有非 dandanplay 的 API 路由
-app.include_router(api_router, prefix="/api")
-
 # 新增：显式地挂载外部控制API路由，以确保其优先级
 app.include_router(control_router, prefix="/api/control", tags=["External Control API"])
 
+# 包含所有非 dandanplay 的 API 路由
+app.include_router(api_router, prefix="/api")
+
+
 app.include_router(dandan_router, prefix="/api/v1", tags=["DanDanPlay Compatible"], include_in_schema=False)
 
-# --- 前端服务 (生产环境) ---
-# 在所有API路由注册完毕后，再挂载前端服务，以确保API路由优先匹配。
-# 在生产环境中，我们需要挂载 Vite 构建后的静态资源目录
-# 并且需要一个“捕获所有”的路由来始终提供 index.html，以支持前端路由。
-if settings.environment == "development":
-    # 开发环境：所有非API请求都重定向到Vite开发服务器
-    @app.get("/{full_path:path}", include_in_schema=False)
-    async def serve_react_app_dev(request: Request, full_path: str):
-        base_url = f"http://{settings.client.host}:{settings.client.port}"
-        return RedirectResponse(url=f"{base_url}/{full_path}" if full_path else base_url)
-else:
-    # 生产环境：显式挂载静态资源目录
-    app.mount("/assets", StaticFiles(directory="web/dist/assets"), name="assets")
-    # 修正：挂载前端的静态图片 (如 logo)，使其指向正确的 'web/dist/images' 目录
-    app.mount("/images", StaticFiles(directory="web/dist/images"), name="images")
-    # pwa挂载
-    #app.mount("/manifest.json", StaticFiles(directory="web/dist/manifest.json"), name="manifest")
-    # 挂载用户缓存的图片 (如海报)
-    app.mount("/data/images", StaticFiles(directory="config/image"), name="cached_images")
-    # 然后，为所有其他路径提供 index.html 以支持前端路由
-    @app.get("/{full_path:path}", include_in_schema=False)
-    async def serve_spa(request: Request, full_path: str):
-        return FileResponse("web/dist/index.html")
+
 
 # 添加一个运行入口，以便直接从配置启动
 # 这样就可以通过 `python -m src.main` 来运行，并自动使用 config.yml 中的端口和主机

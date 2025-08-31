@@ -420,38 +420,31 @@ class RenrenScraper(BaseScraper):
         if not detail_env or not detail_env.data or not detail_env.data.episodeList:
             return []
 
-        # 构造分集
-        episodes: List[RrspEpisodeInfo] = []
-        for idx, ep in enumerate(detail_env.data.episodeList, start=1):
+        # 过滤
+        raw_episodes = []
+        for ep in detail_env.data.episodeList:
             sid = str(ep.get("sid", "").strip())
-            if not sid:
-                continue
-            #ep_title = str(ep.get("title") or detail_env.data.dramaInfo.title)    #佬说这里引起标题不对
-            ep_title = str(ep.get("title") or f"第{idx:02d}集")
-            episodes.append(RrspEpisodeInfo(sid=sid, order=idx, title=ep_title))
+            if sid:
+                raw_episodes.append(ep)
 
-        if target_episode_index:
-            episodes = [e for e in episodes if e.order == target_episode_index]
-
-        provider_eps = [
-            models.ProviderEpisodeInfo(
-                provider=self.provider_name,
-                episodeId=e.sid,  # 人人弹幕按 episode sid 获取
-                title=e.title,
-                episodeIndex=e.order,
-                url=None,
-            )
-            for e in episodes
-        ]
-
-        # Apply custom blacklist from config
+        # 统一过滤逻辑
         blacklist_pattern = await self.get_episode_blacklist_pattern()
         if blacklist_pattern:
-            original_count = len(provider_eps)
-            provider_eps = [ep for ep in provider_eps if not blacklist_pattern.search(ep.title)]
-            filtered_count = original_count - len(provider_eps)
-            if filtered_count > 0:
-                self.logger.info(f"Renren: 根据自定义黑名单规则过滤掉了 {filtered_count} 个分集。")
+            original_count = len(raw_episodes)
+            raw_episodes = [ep for ep in raw_episodes if not blacklist_pattern.search(str(ep.get("title", "")))]
+            self.logger.info(f"Renren: 根据黑名单规则过滤掉了 {original_count - len(raw_episodes)} 个分集。")
+
+        # 过滤后再编号
+        provider_eps = []
+        for i, ep in enumerate(raw_episodes):
+            ep_title = str(ep.get("title") or f"第{i+1:02d}集")
+            provider_eps.append(models.ProviderEpisodeInfo(
+                provider=self.provider_name,
+                episodeId=str(ep.get("sid")),
+                title=ep_title,
+                episodeIndex=i + 1,
+                url=None,
+            ))
 
         if target_episode_index is None and db_media_type is None and provider_eps:
             await self._set_to_cache(cache_key, [e.model_dump() for e in provider_eps], 'episodes_ttl_seconds', 1800)

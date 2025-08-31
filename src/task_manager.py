@@ -24,7 +24,7 @@ class TaskSuccess(Exception):
     pass
 
 class Task:
-    def __init__(self, task_id: str, title: str, coro_factory: Callable[[Callable], Coroutine], scheduled_task_id: Optional[str] = None):
+    def __init__(self, task_id: str, title: str, coro_factory: Callable[[Callable], Coroutine], scheduled_task_id: Optional[str] = None, unique_key: Optional[str] = None):
         self.task_id = task_id
         self.title = title
         self.coro_factory: Callable[[AsyncSession, Callable], Coroutine] = coro_factory
@@ -34,6 +34,7 @@ class Task:
         self.scheduled_task_id = scheduled_task_id
         self.last_update_time: float = 0.0
         self.update_lock = asyncio.Lock()
+        self.unique_key = unique_key
         self.pause_event.set() # 默认为运行状态 (事件被设置)
 
 class TaskManager:
@@ -43,6 +44,7 @@ class TaskManager:
         self._worker_task: asyncio.Task | None = None
         self._current_task: Optional[Task] = None
         self._pending_titles: set[str] = set()
+        self._active_unique_keys: set[str] = set()
         self._lock = asyncio.Lock()
         self.logger = logging.getLogger(self.__class__.__name__)
 
@@ -115,10 +117,20 @@ class TaskManager:
                     )
                 self.logger.error(f"任务 '{task.title}' (ID: {task.task_id}) 执行失败: {traceback.format_exc()}")
             finally:
+                # 任务完成后，从活动键集合中移除其唯一键
+                async with self._lock:
+                    if task.unique_key:
+                        self._active_unique_keys.discard(task.unique_key)
                 self._queue.task_done()
                 task.done_event.set()
 
-    async def submit_task(self, coro_factory: Callable[[AsyncSession, Callable], Coroutine], title: str, scheduled_task_id: Optional[str] = None) -> Tuple[str, asyncio.Event]:
+    async def submit_task(
+        self,
+        coro_factory: Callable[[AsyncSession, Callable], Coroutine],
+        title: str,
+        scheduled_task_id: Optional[str] = None,
+        unique_key: Optional[str] = None
+    ) -> Tuple[str, asyncio.Event]:
         """提交一个新任务到队列，并在数据库中创建记录。返回任务ID和完成事件。"""
         async with self._lock:
             # 检查是否有同名任务正在排队或运行
@@ -126,10 +138,16 @@ class TaskManager:
                 raise ValueError(f"任务 '{title}' 已在队列中，请勿重复提交。")
             if self._current_task and self._current_task.title == title:
                 raise ValueError(f"任务 '{title}' 已在运行中，请勿重复提交。")
+            
+            # 新增：检查唯一键，防止同一资源的多个任务同时进行
+            if unique_key:
+                if unique_key in self._active_unique_keys:
+                    raise ValueError(f"一个针对此媒体的导入任务已在队列中或正在运行，请勿重复提交。")
+                self._active_unique_keys.add(unique_key)
             self._pending_titles.add(title)
 
         task_id = str(uuid4())
-        task = Task(task_id, title, coro_factory, scheduled_task_id=scheduled_task_id)
+        task = Task(task_id, title, coro_factory, scheduled_task_id=scheduled_task_id, unique_key=unique_key)
         
         async with self._session_factory() as session:
             await crud.create_task_in_history(

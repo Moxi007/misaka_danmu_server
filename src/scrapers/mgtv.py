@@ -149,16 +149,7 @@ class MgtvScraper(BaseScraper):
     provider_name = "mgtv"
     handled_domains = ["www.mgtv.com"]
     referer = "https://www.mgtv.com/"
-
-    # English keywords that often appear as standalone acronyms or words
-    _ENG_JUNK = r'NC|OP|ED|SP|OVA|OAD|CM|PV|MV|BDMenu|Menu|Bonus|Recap|Teaser|Trailer|Preview|CD|Disc|Scan|Sample|Logo|Info|EDPV|SongSpot|BDSpot'
-    # Chinese keywords that are often embedded in titles.
-    _CN_JUNK = r'特典|预告|广告|菜单|花絮|特辑|速看|资讯|彩蛋|直拍|直播回顾|片头|片尾|幕后|映像|番外篇|纪录片|访谈|番外|短片|加更|走心|解忧|纯享'
-
-    _JUNK_TITLE_PATTERN = re.compile(
-        r'(\[|\【|\b)(' + _ENG_JUNK + r')(\d{1,2})?(\s|_ALL)?(\]|\】|\b)|(' + _CN_JUNK + r')',
-        re.IGNORECASE
-    )
+    _PROVIDER_SPECIFIC_BLACKLIST_DEFAULT = r"^(.*?)(抢先(看|版)|加更(版)?|花絮|预告|特辑|(特别|惊喜|纳凉)?企划|彩蛋|专访|幕后(花絮)?|直播|纯享|未播|衍生|番外|合伙人手记|会员(专享|加长)|片花|精华|看点|速看|解读|reaction|超前营业|超前(vlog)?|陪看(记)?|.{3,}篇|影评)(.*?)$"
 
     def __init__(self, session_factory: async_sessionmaker[AsyncSession], config_manager: ConfigManager):
         super().__init__(session_factory, config_manager)
@@ -245,11 +236,6 @@ class MgtvScraper(BaseScraper):
                             # 新增：只处理芒果TV自有的内容 (source为'imgo')
                             if item.source != "imgo":
                                 self.logger.debug(f"MGTV: 跳过一个非芒果TV自有的搜索结果: {item.title} (源: {item.source})")
-                                continue
-
-                            # 新增：使用正则表达式过滤掉预告、花絮等非正片内容
-                            if self._JUNK_TITLE_PATTERN.search(item.title):
-                                self.logger.debug(f"MGTV: 过滤掉非正片内容: '{item.title}'")
                                 continue
 
                             if not item.id:
@@ -355,51 +341,38 @@ class MgtvScraper(BaseScraper):
                 else:
                     break # No more pages
 
-            # 新增：在排序前，过滤掉预告、花絮等非正片内容
-            filtered_episodes = []
-            for ep in all_episodes:
-                # 优先使用更具描述性的 t3 标题进行检查，如果不存在则使用 t1
-                title_to_check = ep.title3 or ep.title
-                if self._JUNK_TITLE_PATTERN.search(title_to_check):
-                    self.logger.debug(f"MGTV: 在分集列表中过滤掉非正片内容: '{title_to_check}'")
-                    continue
-                filtered_episodes.append(ep)
+            raw_episodes = all_episodes
 
-            # 修正：API返回的默认顺序和 video_id 都不可靠。
-            # 优先使用标题中的“第N集”进行排序，如果无法解析，则回退到使用发布时间戳排序。
-            # 这种复合排序策略比单独依赖 video_id 或 API 顺序更健壮。
+            # 统一过滤逻辑
+            blacklist_pattern = await self.get_episode_blacklist_pattern()
+            if blacklist_pattern:
+                original_count = len(raw_episodes)
+                raw_episodes = [ep for ep in raw_episodes if not blacklist_pattern.search(f"{ep.title2} {ep.title}".strip())]
+                self.logger.info(f"MGTV: 根据黑名单规则过滤掉了 {original_count - len(raw_episodes)} 个分集。")
+
+            # Apply custom blacklist from config
+            blacklist_pattern = await self.get_episode_blacklist_pattern()
+            if blacklist_pattern:
+                raw_episodes = [ep for ep in raw_episodes if not blacklist_pattern.search(f"{ep.title2} {ep.title}".strip())]
+
+            # 排序和编号
             def get_sort_keys(episode: MgtvEpisode) -> tuple:
-                # 主排序键：从标题 't2' (例如 "第1集") 中解析出的集数
                 ep_num_match = re.search(r'第(\d+)集', episode.title2)
                 ep_num = int(ep_num_match.group(1)) if ep_num_match else float('inf')
-                
-                # 次排序键：发布时间戳
-                # 如果时间戳不存在，则给一个很大的默认值，使其排在后面
                 timestamp = episode.timestamp or "9999-99-99 99:99:99.9"
-
                 return (ep_num, timestamp)
 
-            sorted_episodes = sorted(filtered_episodes, key=get_sort_keys)
-            
+            sorted_episodes = sorted(raw_episodes, key=get_sort_keys)
+
             provider_episodes = [
                 models.ProviderEpisodeInfo(
                     provider=self.provider_name,
-                    # The comment ID is a combination of collection_id and video_id
                     episodeId=f"{media_id},{ep.video_id}",
                     title=f"{ep.title2} {ep.title}".strip(),
                     episodeIndex=i + 1,
                     url=f"https://www.mgtv.com/b/{media_id}/{ep.video_id}.html"
                 ) for i, ep in enumerate(sorted_episodes)
             ]
-
-            # Apply custom blacklist from config
-            blacklist_pattern = await self.get_episode_blacklist_pattern()
-            if blacklist_pattern:
-                original_count = len(provider_episodes)
-                provider_episodes = [ep for ep in provider_episodes if not blacklist_pattern.search(ep.title)]
-                filtered_count = original_count - len(provider_episodes)
-                if filtered_count > 0:
-                    self.logger.info(f"Mgtv: 根据自定义黑名单规则过滤掉了 {filtered_count} 个分集。")
 
             if target_episode_index:
                 return [ep for ep in provider_episodes if ep.episodeIndex == target_episode_index]

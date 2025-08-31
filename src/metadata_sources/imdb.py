@@ -97,42 +97,48 @@ class ImdbMetadataSource(BaseMetadataSource):
                 response.raise_for_status()
                 html = response.text
 
+                name_en: Optional[str] = None
+                aliases_cn: List[str] = []
+
                 next_data_match = re.search(r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>', html)
                 if next_data_match:
                     try:
                         next_data = json.loads(next_data_match.group(1))
                         main_data = next_data.get("props", {}).get("pageProps", {}).get("mainColumnData", {})
-                        
+
                         name_en = main_data.get("titleText", {}).get("text")
                         original_title = main_data.get("originalTitleText", {}).get("text")
-                        
-                        aliases_cn = []
+
                         akas = main_data.get("akas", {})
                         if akas and akas.get("edges"):
                             for edge in akas["edges"]:
                                 node = edge.get("node", {})
                                 if node.get("text"):
                                     aliases_cn.append(node["text"])
-                        
-                        if name_en != original_title:
+
+                        if name_en and original_title and name_en != original_title:
                             aliases_cn.append(original_title)
 
-                        return models.MetadataDetailsResponse(
-                            id=item_id, imdbId=item_id, title=name_en,
-                            nameEn=name_en,
-                            aliasesCn=list(dict.fromkeys(filter(None, aliases_cn)))
-                        )
                     except (json.JSONDecodeError, KeyError, TypeError) as e:
                         self.logger.warning(f"解析 IMDb __NEXT_DATA__ 失败，将回退到正则匹配。错误: {e}")
+                        name_en = None # 重置 name_en 以确保触发回退
 
-                # Fallback to Regex
-                title_match = re.search(r'<h1.*?><span.*?>(.*?)</span></h1>', html)
-                name_en = title_match.group(1).strip() if title_match else None
-                akas_section_match = re.search(r'<div data-testid="akas".*?>(.*?)</div>', html, re.DOTALL)
-                aliases_cn = []
-                if akas_section_match:
-                    alias_matches = re.findall(r'<li.*?<a.*?>(.*?)</a>', akas_section_match.group(1), re.DOTALL)
-                    aliases_cn = [alias.strip() for alias in alias_matches]
+                # 如果 __NEXT_DATA__ 解析失败或未找到标题，则回退到正则
+                if not name_en:
+                    self.logger.info(f"IMDb: 正在为 item_id={item_id} 使用正则回退方案。")
+                    title_match = re.search(r'<h1.*?><span.*?>(.*?)</span></h1>', html)
+                    name_en = title_match.group(1).strip() if title_match else None
+
+                    # 仅在回退模式下使用正则解析别名
+                    akas_section_match = re.search(r'<div data-testid="akas".*?>(.*?)</div>', html, re.DOTALL)
+                    if akas_section_match:
+                        alias_matches = re.findall(r'<li.*?<a.*?>(.*?)</a>', akas_section_match.group(1), re.DOTALL)
+                        aliases_cn.extend([alias.strip() for alias in alias_matches])
+
+                # 在创建响应对象之前进行最终检查
+                if not name_en:
+                    self.logger.error(f"IMDb: 无法从详情页解析出标题 (item_id={item_id})")
+                    return None
 
                 return models.MetadataDetailsResponse(
                     id=item_id, imdbId=item_id, title=name_en,

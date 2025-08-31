@@ -75,3 +75,15 @@ def convert_keys_to_camel(data: Any) -> Any:
     if isinstance(data, list):
         return [convert_keys_to_camel(i) for i in data]
     return data
+
+def clean_xml_string(xml_string: str) -> str:
+    """
+    移除XML字符串中的无效字符以防止解析错误。
+    此函数针对XML 1.0规范中非法的控制字符。
+    """
+    # XML 1.0 规范允许的字符范围: #x9 | #xA | #xD | [#x20-#xD7FF] | [#xE000-#xFFFD] | [#x10000-#x10FFFF]
+    # 此正则表达式匹配所有不在上述范围内的字符。
+    invalid_xml_char_re = re.compile(
+        r'[^\x09\x0A\x0D\x20-\uD7FF\uE000-\uFFFD\U00010000-\U0010FFFF]'
+    )
+    return invalid_xml_char_re.sub('', xml_string)

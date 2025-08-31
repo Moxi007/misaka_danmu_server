@@ -104,6 +104,15 @@ class MetadataDetailsResponse(BaseModel):
     imageUrl: Optional[str] = None
     details: Optional[str] = None
 
+class AnimeCreate(BaseModel):
+    """Model for creating a new anime entry manually."""
+    title: str = Field(..., description="作品标题")
+    type: str = Field("tv_series", description="作品类型 (tv_series, movie, ova, other)")
+    season: int = Field(1, description="季度")
+    year: Optional[int] = Field(None, description="年份")
+    imageUrl: Optional[str] = Field(None, description="海报图片URL")
+
+
 class AnimeDetailUpdate(BaseModel):
     """用于更新番剧详细信息的模型"""
     title: str = Field(..., min_length=1, description="新的影视名称")
@@ -153,6 +162,11 @@ class AnimeFullDetails(BaseModel):
     aliasCn1: Optional[str] = None
     aliasCn2: Optional[str] = None
     aliasCn3: Optional[str] = None
+
+class SourceCreate(BaseModel):
+    providerName: str = Field(..., description="数据源提供方名称")
+    mediaId: str = Field(..., description="在该数据源上的媒体ID")
+
 
 class SourceInfo(BaseModel):
     """代表一个已关联的数据源的详细信息。"""
@@ -427,6 +441,16 @@ class EnrichedTMDBGroupInGroupDetail(BaseModel):
 
 class EnrichedTMDBEpisodeGroupDetails(TMDBEpisodeGroupDetails):
     groups: List[EnrichedTMDBGroupInGroupDetail]
+
+
+class BatchManualImportItem(BaseModel):
+    episodeTitle: Optional[str] = Field(None, description="分集标题 (可选)")
+    episodeIndex: int = Field(..., gt=0, description="集数")
+    content: str = Field(..., description="URL或XML文件内容")
+
+class BatchManualImportRequest(BaseModel):
+    items: List[BatchManualImportItem]
+
 
 # --- Rate Limiter Models ---
 

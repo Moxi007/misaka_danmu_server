@@ -89,7 +89,7 @@ async def webhook_search_and_dispatch_task(
         )
 
         if not all_search_results:
-            raise TaskSuccess(f"Webhook 任务失败: 未找到 '{animeTitle}' 的任何可用源。")
+            raise ValueError(f"未找到 '{animeTitle}' 的任何可用源。")
 
         # 3. 从所有源的返回结果中，根据类型、季度和标题相似度选择最佳匹配项
         ordered_settings = await crud.get_all_scraper_settings(session)
@@ -108,7 +108,7 @@ async def webhook_search_and_dispatch_task(
                 valid_candidates.append(item)
 
         if not valid_candidates:
-            raise TaskSuccess(f"Webhook 任务失败: 未找到 '{animeTitle}' 的精确匹配项。")
+            raise ValueError(f"未找到 '{animeTitle}' 的精确匹配项。")
 
         valid_candidates.sort(
             key=lambda item: (fuzz.token_set_ratio(animeTitle, item.title), -provider_order.get(item.provider, 999)),

@@ -1,10 +1,12 @@
 import { Button, Card, Input, message } from 'antd'
 import { useEffect, useState } from 'react'
 import { getCustomDomain, setCustomDomain } from '../../../apis'
+import { useMessage } from '../../../MessageContext'
 
 export const Domain = () => {
   const [loading, setLoading] = useState(false)
   const [domain, setDomain] = useState('')
+  const messageApi = useMessage()
 
   useEffect(() => {
     setLoading(true)
@@ -20,9 +22,9 @@ export const Domain = () => {
   const handleEdit = async () => {
     try {
       await setCustomDomain({ value: domain })
-      message.success('保存成功')
+      messageApi.success('保存成功')
     } catch (error) {
-      message.error('保存失败')
+      messageApi.error('保存失败')
     }
   }
 
@@ -30,7 +32,7 @@ export const Domain = () => {
     <div className="my-6">
       <Card loading={loading} title="自定义域名设置">
         <div>
-          设置后，复制按钮将自动拼接 "http(s)://域名(ip):端口(port)/api/Token值"
+          设置后，复制按钮将自动拼接 "http(s)://域名(ip):端口(port)/api/v1/Token值"
           格式的完整URL。
         </div>
         <div className="flex items-center justify-start mt-4">

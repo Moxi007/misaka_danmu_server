@@ -157,20 +157,7 @@ class BilibiliScraper(BaseScraper):
     provider_name = "bilibili"
     handled_domains = ["www.bilibili.com", "b23.tv"]
     referer = "https://www.bilibili.com/"
-
-    # English keywords that often appear as standalone acronyms or words
-    _ENG_JUNK = r'NC|OP|ED|SP|OVA|OAD|CM|PV|MV|BDMenu|Menu|Bonus|Recap|Teaser|Trailer|Preview|CD|Disc|Scan|Sample|Logo|Info|EDPV|SongSpot|BDSpot'
-    # Chinese keywords that are often embedded in titles. Added '番外篇' from user feedback.
-    _CN_JUNK = r'特典|预告|广告|菜单|花絮|特辑|速看|资讯|彩蛋|直拍|直播回顾|片头|片尾|幕后|映像|番外篇'
-
-    # Regex to filter out non-main content.
-    # It's split into two parts:
-    # 1. English keywords that require word boundaries or brackets to avoid incorrect matches (e.g., 'SP' in 'speed').
-    # 2. Chinese keywords that can be embedded within other text.
-    _JUNK_TITLE_PATTERN = re.compile(
-        r'(\[|\【|\b)(' + _ENG_JUNK + r')(\d{1,2})?(\s|_ALL)?(\]|\】|\b)|(' + _CN_JUNK + r')',
-        re.IGNORECASE
-    )
+    _PROVIDER_SPECIFIC_BLACKLIST_DEFAULT = r"^(.*?)(抢先(看|版)?|加更|花絮|预告|特辑|彩蛋|专访|幕后|直播|纯享|未播|衍生|番外|会员(专享)?|片花|精华|看点|速看|解读|reaction|影评|解说|吐槽|盘点)(.*?)$"
 
     # For WBI signing
     _WBI_MIXIN_KEY_CACHE: Dict[str, Any] = {"key": None, "timestamp": 0}
@@ -524,14 +511,14 @@ class BilibiliScraper(BaseScraper):
             if api_result.code == 0 and api_result.data and api_result.data.result:
                 self.logger.info(f"Bilibili: API call for type '{search_type}' successful, found {len(api_result.data.result)} items.")
                 for item in api_result.data.result:
-                    if self._JUNK_TITLE_PATTERN.search(item.title):
-                        self.logger.debug(f"Bilibili: Filtering out junk title: '{item.title}'")
-                        continue
-
                     media_id = f"ss{item.season_id}" if item.season_id else f"bv{item.bvid}" if item.bvid else ""
                     if not media_id: continue
 
                     media_type = "movie" if item.season_type_name == "电影" else "tv_series"
+                    
+                    # 修正：对于电影类型，即使API返回的ep_size为0或null，也应将总集数视为1。
+                    # 这可以改善前端UI的显示，使其更符合用户对电影的直观理解。
+                    episode_count = 1 if media_type == "movie" else item.ep_size
                     
                     year = None
                     try:
@@ -547,7 +534,7 @@ class BilibiliScraper(BaseScraper):
                     results.append(models.ProviderSearchInfo(
                         provider=self.provider_name, mediaId=media_id, title=cleaned_title,
                         type=media_type, season=get_season_from_title(cleaned_title),
-                        year=year, imageUrl=item.cover, episodeCount=item.ep_size,
+                        year=year, imageUrl=item.cover, episodeCount=episode_count,
                         currentEpisodeIndex=episode_info.get("episode") if episode_info else None
                     ))
             else:
@@ -562,10 +549,6 @@ class BilibiliScraper(BaseScraper):
         一个辅助函数，用于将Bilibili的媒体对象转换为通用的 ProviderSearchInfo 模型。
         """
         if not item:
-            return None
-
-        if self._JUNK_TITLE_PATTERN.search(item.title):
-            self.logger.debug(f"Bilibili: Filtering out junk title from media object: '{item.title}'")
             return None
 
         media_id = f"ss{item.season_id}" if item.season_id else f"bv{item.bvid}" if item.bvid else ""
@@ -664,32 +647,25 @@ class BilibiliScraper(BaseScraper):
             response.raise_for_status()
             data = BiliSeasonResult.model_validate(response.json())
             if data.code == 0 and data.result and data.result.episodes:
-                # 新增：过滤掉非正片内容，如PV、SP、预告等
-                filtered_episodes = []
-                for ep in data.result.episodes:
-                    # 优先检查更具体的 show_title，然后检查 long_title
-                    title_to_check = ep.show_title or ep.long_title
-                    if self._JUNK_TITLE_PATTERN.search(title_to_check):
-                        self.logger.debug(f"Bilibili: 过滤掉PGC分集: '{title_to_check}'")
-                        continue
-                    filtered_episodes.append(ep)
+                raw_episodes = data.result.episodes
 
-                episodes = [
-                    models.ProviderEpisodeInfo(
-                        provider=self.provider_name, episodeId=f"{ep.aid},{ep.cid}",
-                        title=ep.long_title or ep.title, episodeIndex=i + 1,
-                        url=f"https://www.bilibili.com/bangumi/play/ep{ep.id}"
-                    ) for i, ep in enumerate(filtered_episodes)
-                ]
-
-                # Apply custom blacklist from config
+                # 统一过滤逻辑
                 blacklist_pattern = await self.get_episode_blacklist_pattern()
                 if blacklist_pattern:
-                    original_count = len(episodes)
-                    episodes = [ep for ep in episodes if not blacklist_pattern.search(ep.title)]
-                    filtered_count = original_count - len(episodes)
-                    if filtered_count > 0:
-                        self.logger.info(f"Bilibili: 根据自定义黑名单规则过滤掉了 {filtered_count} 个分集。")
+                    original_count = len(raw_episodes)
+                    raw_episodes = [ep for ep in raw_episodes if not blacklist_pattern.search(ep.long_title or ep.title)]
+                    self.logger.info(f"Bilibili: 根据黑名单规则过滤掉了 {original_count - len(raw_episodes)} 个PGC分集。")
+
+                # 过滤后再编号
+                episodes = [
+                    models.ProviderEpisodeInfo(
+                        provider=self.provider_name,
+                        episodeId=f"{ep.aid},{ep.cid}",
+                        title=ep.long_title or ep.title,
+                        episodeIndex=i + 1,
+                        url=f"https://www.bilibili.com/bangumi/play/ep{ep.id}"
+                    ) for i, ep in enumerate(raw_episodes)
+                ]
 
                 return [ep for ep in episodes if ep.episodeIndex == target_episode_index] if target_episode_index else episodes
         except Exception as e:
@@ -707,22 +683,25 @@ class BilibiliScraper(BaseScraper):
             response.raise_for_status()
             data = BiliVideoViewResult.model_validate(response.json())
             if data.code == 0 and data.data and data.data.pages:
-                episodes = [
-                    models.ProviderEpisodeInfo(
-                        provider=self.provider_name, episodeId=f"{data.data.aid},{p.cid}",
-                        title=p.part, episodeIndex=p.page,
-                        url=f"https://www.bilibili.com/video/{bvid}?p={p.page}"
-                    ) for p in data.data.pages
-                ]
+                raw_episodes = data.data.pages
 
-                # Apply custom blacklist from config
+                # 统一过滤逻辑
                 blacklist_pattern = await self.get_episode_blacklist_pattern()
                 if blacklist_pattern:
-                    original_count = len(episodes)
-                    episodes = [ep for ep in episodes if not blacklist_pattern.search(ep.title)]
-                    filtered_count = original_count - len(episodes)
-                    if filtered_count > 0:
-                        self.logger.info(f"Bilibili: 根据自定义黑名单规则过滤掉了 {filtered_count} 个分集。")
+                    original_count = len(raw_episodes)
+                    raw_episodes = [p for p in raw_episodes if not blacklist_pattern.search(p.part)]
+                    self.logger.info(f"Bilibili: 根据黑名单规则过滤掉了 {original_count - len(raw_episodes)} 个UGC分集。")
+
+                # 过滤后再编号
+                episodes = [
+                    models.ProviderEpisodeInfo(
+                        provider=self.provider_name,
+                        episodeId=f"{data.data.aid},{p.cid}",
+                        title=p.part,
+                        episodeIndex=i + 1, # 使用 enumerate 重新编号
+                        url=f"https://www.bilibili.com/video/{bvid}?p={p.page}"
+                    ) for i, p in enumerate(raw_episodes)
+                ]
 
                 return [ep for ep in episodes if ep.episodeIndex == target_episode_index] if target_episode_index else episodes
         except Exception as e:

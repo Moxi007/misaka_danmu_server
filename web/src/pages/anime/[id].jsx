@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import {
+  addSourceToAnime,
   deleteAnimeSource,
   deleteAnimeSourceSingle,
   fullSourceUpdate,
@@ -34,6 +35,9 @@ import { MyIcon } from '@/components/MyIcon'
 import classNames from 'classnames'
 import { padStart } from 'lodash'
 import { HomeOutlined } from '@ant-design/icons'
+import { useModal } from '../../ModalContext'
+import { useMessage } from '../../MessageContext'
+import { AddSourceModal } from '../../components/AddSourceModal'
 
 export const AnimeDetail = () => {
   const { id } = useParams()
@@ -46,8 +50,11 @@ export const AnimeDetail = () => {
   const [keyword, setKeyword] = useState('')
   const [selectedRows, setSelectedRows] = useState([])
   const [libraryPageSisze, setLibraryPageSisze] = useState(10)
+  const [isAddSourceModalOpen, setIsAddSourceModalOpen] = useState(false)
 
   const navigate = useNavigate()
+  const modalApi = useModal()
+  const messageApi = useMessage()
 
   console.log(sourceList, 'sourceList')
 
@@ -76,6 +83,11 @@ export const AnimeDetail = () => {
     }
   }
 
+  const handleAddSourceSuccess = () => {
+    setIsAddSourceModalOpen(false)
+    getDetail() // 添加成功后刷新数据源列表
+  }
+
   const handleEditSource = async () => {
     try {
       const res = await getAnimeLibrary()
@@ -85,7 +97,7 @@ export const AnimeDetail = () => {
       setRenderList(list)
       setEditOpen(true)
     } catch (error) {
-      message.error('获取数据源失败')
+      messageApi.error('获取数据源失败')
     }
   }
 
@@ -94,7 +106,7 @@ export const AnimeDetail = () => {
   }, [keyword, libraryList])
 
   const handleConfirmSource = item => {
-    Modal.confirm({
+    modalApi.confirm({
       title: '关联数据源',
       zIndex: 1002,
       content: (
@@ -113,18 +125,18 @@ export const AnimeDetail = () => {
             sourceAnimeId: animeDetail.animeId,
             targetAnimeId: item.animeId,
           })
-          message.success('关联成功')
+          messageApi.success('关联成功')
           setEditOpen(false)
           navigate(RoutePaths.LIBRARY)
         } catch (error) {
-          message.error(`关联失败:${error.message}`)
+          messageApi.error(`关联失败:${error.message}`)
         }
       },
     })
   }
 
   const handleBatchDelete = () => {
-    Modal.confirm({
+    modalApi.confirm({
       title: '删除数据源',
       zIndex: 1002,
       content: (
@@ -143,14 +155,14 @@ export const AnimeDetail = () => {
           })
           goTask(res)
         } catch (error) {
-          message.error(`提交批量删除任务失败:${error.message}`)
+          messageApi.error(`提交批量删除任务失败:${error.message}`)
         }
       },
     })
   }
 
   const handleDeleteSingle = record => {
-    Modal.confirm({
+    modalApi.confirm({
       title: '删除数据源',
       zIndex: 1002,
       content: (
@@ -169,14 +181,14 @@ export const AnimeDetail = () => {
           })
           goTask(res)
         } catch (error) {
-          message.error(`提交删除任务失败:${error.message}`)
+          messageApi.error(`提交删除任务失败:${error.message}`)
         }
       },
     })
   }
 
   const handleIncrementalUpdate = record => {
-    Modal.confirm({
+    modalApi.confirm({
       title: '增量刷新',
       zIndex: 1002,
       content: (
@@ -195,14 +207,14 @@ export const AnimeDetail = () => {
           })
           goTask(res)
         } catch (error) {
-          message.error(`启动增量更新任务失败: ${error.message}`)
+          messageApi.error(`启动增量更新任务失败: ${error.message}`)
         }
       },
     })
   }
 
   const handleFullSourceUpdate = record => {
-    Modal.confirm({
+    modalApi.confirm({
       title: '全量刷新',
       zIndex: 1002,
       content: (
@@ -217,14 +229,14 @@ export const AnimeDetail = () => {
           })
           goTask(res)
         } catch (error) {
-          message.error(`启动刷新任务失败: ${error.message}`)
+          messageApi.error(`启动刷新任务失败: ${error.message}`)
         }
       },
     })
   }
 
   const goTask = res => {
-    Modal.confirm({
+    modalApi.confirm({
       title: '提示',
       zIndex: 1002,
       content: (
@@ -246,6 +258,9 @@ export const AnimeDetail = () => {
     })
   }
 
+  const operateWidth = sourceList?.every(it => it.providerName === 'custom')
+    ? 90
+    : 180
   const columns = [
     {
       title: '源提供方',
@@ -295,7 +310,7 @@ export const AnimeDetail = () => {
     },
     {
       title: '操作',
-      width: 180,
+      width: operateWidth,
       fixed: 'right',
       render: (_, record) => {
         return (
@@ -336,49 +351,53 @@ export const AnimeDetail = () => {
                 )}
               </span>
             </Tooltip>
-            <Tooltip title="定时任务配合（任务管理器-定时任务-定时增量追更）使用，增量获取下一集">
-              <span
-                className="cursor-pointer hover:text-primary"
-                onClick={async () => {
-                  try {
-                    await toggleSourceIncremental({
-                      sourceId: record.sourceId,
-                    })
-                    setSourceList(list => {
-                      return list.map(it => {
-                        if (it.sourceId === record.sourceId) {
-                          return {
-                            ...it,
-                            incrementalRefreshEnabled:
-                              !it.incrementalRefreshEnabled,
-                          }
-                        } else {
-                          return it
-                        }
+            {record?.providerName !== 'custom' && (
+              <Tooltip title="定时任务配合（任务管理器-定时任务-定时增量追更）使用，增量获取下一集">
+                <span
+                  className="cursor-pointer hover:text-primary"
+                  onClick={async () => {
+                    try {
+                      await toggleSourceIncremental({
+                        sourceId: record.sourceId,
                       })
-                    })
-                  } catch (error) {
-                    alert(`操作失败: ${error.message}`)
-                  }
-                }}
-              >
-                <MyIcon
-                  icon="clock"
-                  size={20}
-                  className={classNames({
-                    'text-red-400': record.incrementalRefreshEnabled,
-                  })}
-                ></MyIcon>
-              </span>
-            </Tooltip>
-            <Tooltip title="增量获取下一集">
-              <span
-                className="cursor-pointer hover:text-primary"
-                onClick={() => handleIncrementalUpdate(record)}
-              >
-                <MyIcon icon="zengliang" size={20}></MyIcon>
-              </span>
-            </Tooltip>
+                      setSourceList(list => {
+                        return list.map(it => {
+                          if (it.sourceId === record.sourceId) {
+                            return {
+                              ...it,
+                              incrementalRefreshEnabled:
+                                !it.incrementalRefreshEnabled,
+                            }
+                          } else {
+                            return it
+                          }
+                        })
+                      })
+                    } catch (error) {
+                      alert(`操作失败: ${error.message}`)
+                    }
+                  }}
+                >
+                  <MyIcon
+                    icon="clock"
+                    size={20}
+                    className={classNames({
+                      'text-red-400': record.incrementalRefreshEnabled,
+                    })}
+                  ></MyIcon>
+                </span>
+              </Tooltip>
+            )}
+            {record?.providerName !== 'custom' && (
+              <Tooltip title="增量获取下一集">
+                <span
+                  className="cursor-pointer hover:text-primary"
+                  onClick={() => handleIncrementalUpdate(record)}
+                >
+                  <MyIcon icon="zengliang" size={20}></MyIcon>
+                </span>
+              </Tooltip>
+            )}
             <Tooltip title="分集列表">
               <span
                 className="cursor-pointer hover:text-primary"
@@ -389,14 +408,17 @@ export const AnimeDetail = () => {
                 <MyIcon icon="book" size={20}></MyIcon>
               </span>
             </Tooltip>
-            <Tooltip title="执行全量更新(此操作会删除旧数据)">
-              <span
-                className="cursor-pointer hover:text-primary"
-                onClick={() => handleFullSourceUpdate(record)}
-              >
-                <MyIcon icon="refresh" size={20}></MyIcon>
-              </span>
-            </Tooltip>
+            {record?.providerName !== 'custom' && (
+              <Tooltip title="执行全量更新(此操作会删除旧数据)">
+                <span
+                  className="cursor-pointer hover:text-primary"
+                  onClick={() => handleFullSourceUpdate(record)}
+                >
+                  <MyIcon icon="refresh" size={20}></MyIcon>
+                </span>
+              </Tooltip>
+            )}
+
             <Tooltip title="删除数据源">
               <span
                 className="cursor-pointer hover:text-primary"
@@ -482,16 +504,24 @@ export const AnimeDetail = () => {
           </Col>
         </Row>
         <div className="mt-6">
-          <Button
-            onClick={() => {
-              handleBatchDelete()
-            }}
-            type="primary"
-            disabled={!selectedRows.length}
-            style={{ marginBottom: 16 }}
-          >
-            删除选中
-          </Button>
+          <div className="flex items-center gap-4 mb-4">
+            <Button
+              onClick={() => {
+                handleBatchDelete()
+              }}
+              type="primary"
+              disabled={!selectedRows.length}
+            >
+              删除选中
+            </Button>
+            <Button
+              onClick={() => {
+                setIsAddSourceModalOpen(true)
+              }}
+            >
+              添加数据源
+            </Button>
+          </div>
           {!!sourceList?.length ? (
             <Table
               rowSelection={{ type: 'checkbox', ...rowSelection }}
@@ -536,6 +566,7 @@ export const AnimeDetail = () => {
             onShowSizeChange: (_, size) => {
               setLibraryPageSisze(size)
             },
+            hideOnSinglePage: true,
           }}
           renderItem={(item, index) => {
             return (
@@ -571,6 +602,12 @@ export const AnimeDetail = () => {
           }}
         />
       </Modal>
+      <AddSourceModal
+        open={isAddSourceModalOpen}
+        animeId={id}
+        onCancel={() => setIsAddSourceModalOpen(false)}
+        onSuccess={handleAddSourceSuccess}
+      />
     </div>
   )
 }

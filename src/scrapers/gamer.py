@@ -22,8 +22,6 @@ class GamerScraper(BaseScraper):
     provider_name = "gamer"
     handled_domains = ["ani.gamer.com.tw"]
     referer = "https://ani.gamer.com.tw/"
-
-    _EPISODE_BLACKLIST_PATTERN = re.compile(r"加更|走心|解忧|纯享", re.IGNORECASE)
     def __init__(self, session_factory: async_sessionmaker[AsyncSession], config_manager: ConfigManager):
         super().__init__(session_factory, config_manager)
         self.cc_s2t = OpenCC('s2twp')  # Simplified to Traditional Chinese with phrases
@@ -269,50 +267,44 @@ class GamerScraper(BaseScraper):
             response.raise_for_status()
             soup = BeautifulSoup(response.text, "lxml")
 
-            episodes = []
+            raw_episodes = []
             season_section = soup.find("section", class_="season")
             if season_section:
                 ep_links = season_section.find_all("a")
-                for i, link in enumerate(ep_links):
-                    href = link.get("href")
-                    sn_match = re.search(r"\?sn=(\d+)", href)
-                    if not sn_match: continue
-                    
-                    episodes.append(models.ProviderEpisodeInfo(
-                        provider=self.provider_name, episodeId=sn_match.group(1),
-                        title=self.cc_t2s.convert(link.text.strip()),
-                        episodeIndex=i + 1,
-                        url=f"https://ani.gamer.com.tw{href}"
-                    ))
+                for link in ep_links:
+                    raw_episodes.append({'link': link, 'title': link.text.strip()})
             else:
                 script_content = soup.find("script", string=re.compile("animefun.videoSn"))
                 if script_content:
                     sn_match = re.search(r"animefun.videoSn\s*=\s*(\d+);", script_content.string)
                     title_match = re.search(r"animefun.title\s*=\s*'([^']+)';", script_content.string)
                     if sn_match and title_match:
-                        ep_sn = sn_match.group(1)
-                        episodes.append(models.ProviderEpisodeInfo(
-                            provider=self.provider_name, episodeId=ep_sn,
-                            title=self.cc_t2s.convert(title_match.group(1)), episodeIndex=1,
-                            url=f"https://ani.gamer.com.tw/animeVideo.php?sn={ep_sn}"
-                        ))
+                        raw_episodes.append({'link': None, 'sn': sn_match.group(1), 'title': title_match.group(1)})
 
-            # 根据黑名单过滤分集
-            if self._EPISODE_BLACKLIST_PATTERN:
-                original_count = len(episodes)
-                episodes = [ep for ep in episodes if not self._EPISODE_BLACKLIST_PATTERN.search(ep.title)]
-                filtered_count = original_count - len(episodes)
-                if filtered_count > 0:
-                    self.logger.info(f"Gamer: 根据黑名单规则过滤掉了 {filtered_count} 个分集。")
-            
-            # Apply custom blacklist from config
+            # 统一过滤逻辑
             blacklist_pattern = await self.get_episode_blacklist_pattern()
+            filtered_raw_episodes = raw_episodes
             if blacklist_pattern:
-                original_count = len(episodes)
-                episodes = [ep for ep in episodes if not blacklist_pattern.search(ep.title)]
-                filtered_count = original_count - len(episodes)
-                if filtered_count > 0:
-                    self.logger.info(f"Gamer: 根据自定义黑名单规则过滤掉了 {filtered_count} 个分集。")
+                original_count = len(raw_episodes)
+                filtered_raw_episodes = [ep for ep in raw_episodes if not blacklist_pattern.search(ep['title'])]
+                self.logger.info(f"Gamer: 根据黑名单规则过滤掉了 {original_count - len(filtered_raw_episodes)} 个分集。")
+
+            # 过滤后再编号
+            episodes = []
+            for i, raw_ep in enumerate(filtered_raw_episodes):
+                if raw_ep.get('link'):
+                    href = raw_ep['link'].get("href")
+                    sn_match = re.search(r"\?sn=(\d+)", href)
+                    if not sn_match: continue
+                    episodes.append(models.ProviderEpisodeInfo(
+                        provider=self.provider_name, episodeId=sn_match.group(1), title=self.cc_t2s.convert(raw_ep['title']),
+                        episodeIndex=i + 1, url=f"https://ani.gamer.com.tw{href}"
+                    ))
+                else: # 单集视频
+                    episodes.append(models.ProviderEpisodeInfo(
+                        provider=self.provider_name, episodeId=raw_ep['sn'], title=self.cc_t2s.convert(raw_ep['title']),
+                        episodeIndex=1, url=f"https://ani.gamer.com.tw/animeVideo.php?sn={raw_ep['sn']}"
+                    ))
 
             if target_episode_index:
                 return [ep for ep in episodes if ep.episodeIndex == target_episode_index]

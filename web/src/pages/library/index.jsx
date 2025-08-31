@@ -15,6 +15,7 @@ import {
   Tooltip,
 } from 'antd'
 import {
+  createAnimeEntry,
   deleteAnime,
   getAllEpisode,
   getAnimeDetail,
@@ -33,8 +34,11 @@ import { MyIcon } from '@/components/MyIcon'
 import { DANDAN_TYPE_DESC_MAPPING, DANDAN_TYPE_MAPPING } from '../../configs'
 import dayjs from 'dayjs'
 import { useNavigate } from 'react-router-dom'
+import { CreateAnimeModal } from '../../components/CreateAnimeModal'
 import { RoutePaths } from '../../general/RoutePaths'
 import { padStart } from 'lodash'
+import { useModal } from '../../ModalContext'
+import { useMessage } from '../../MessageContext'
 
 const ApplyField = ({ name, label, fetchedValue, form }) => {
   const currentValue = Form.useWatch(name, form)
@@ -65,6 +69,7 @@ export const Library = () => {
   const [keyword, setKeyword] = useState('')
   const navigate = useNavigate()
   const [libraryPageSize, setLibraryPageSize] = useState(50)
+  const [isCreateModalOpen, setIsCreateModalOpen] = useState(false)
 
   const [form] = Form.useForm()
   const [editOpen, setEditOpen] = useState(false)
@@ -80,6 +85,9 @@ export const Library = () => {
   const imageUrl = Form.useWatch('imageUrl', form)
   const [fetchedMetadata, setFetchedMetadata] = useState(null)
 
+  const modalApi = useModal()
+  const messageApi = useMessage()
+
   const getList = async () => {
     try {
       setLoading(true)
@@ -92,6 +100,11 @@ export const Library = () => {
     } finally {
       setLoading(false)
     }
+  }
+
+  const handleCreateSuccess = () => {
+    setIsCreateModalOpen(false)
+    getList() // 创建成功后刷新列表
   }
 
   useEffect(() => {
@@ -131,6 +144,12 @@ export const Library = () => {
 
     if (Object.keys(newValues).length > 0) {
       form.setFieldsValue(newValues)
+    }
+    // 没有封面时填充url
+    if (!imageUrl && !!fetchedMetadata?.imageUrl) {
+      form.setFieldsValue({
+        imageUrl: fetchedMetadata.imageUrl,
+      })
     }
   }, [fetchedMetadata, form])
 
@@ -252,7 +271,7 @@ export const Library = () => {
   ]
 
   const handleDelete = async record => {
-    Modal.confirm({
+    modalApi.confirm({
       title: '删除',
       zIndex: 1002,
       content: (
@@ -269,14 +288,14 @@ export const Library = () => {
           const res = await deleteAnime({ animeId: record.animeId })
           goTask(res)
         } catch (error) {
-          message.error('提交删除任务失败')
+          messageApi.error('提交删除任务失败')
         }
       },
     })
   }
 
   const goTask = res => {
-    Modal.confirm({
+    modalApi.confirm({
       title: '提示',
       zIndex: 1002,
       content: (
@@ -309,9 +328,9 @@ export const Library = () => {
         tvdbId: values.tvdbId ? `${values.tvdbId}` : null,
       })
       getList()
-      message.success('信息更新成功')
+      messageApi.success('信息更新成功')
     } catch (error) {
-      message.error(error.detail || '编辑失败')
+      messageApi.error(error.detail || '编辑失败')
     } finally {
       setConfirmLoading(false)
       setEditOpen(false)
@@ -337,11 +356,13 @@ export const Library = () => {
         data: res.data,
         source,
       })
-      message.success(
+      messageApi.success(
         `${source.toUpperCase()} 信息获取成功，请检查并应用建议的别名。`
       )
     } catch (error) {
-      message.error(`获取 ${source.toUpperCase()} 详情失败: ${error.message}`)
+      messageApi.error(
+        `获取 ${source.toUpperCase()} 详情失败: ${error.message}`
+      )
     } finally {
       setSearchAsIdLoading(false)
     }
@@ -425,10 +446,10 @@ export const Library = () => {
         setTmdbResult(res?.data || [])
         setTmdbOpen(true)
       } else {
-        message.error('没有找到相关内容')
+        messageApi.error('没有找到相关内容')
       }
     } catch (error) {
-      message.error(`TMDB搜索失败:${error.message}`)
+      messageApi.error(`TMDB搜索失败:${error.message}`)
     } finally {
       setSearchTmdbLoading(false)
     }
@@ -449,10 +470,10 @@ export const Library = () => {
         setTvdbResult(res?.data || [])
         setTvdbOpen(true)
       } else {
-        message.error('没有找到相关内容')
+        messageApi.error('没有找到相关内容')
       }
     } catch (error) {
-      message.error(`TVDB搜索失败:${error.message}`)
+      messageApi.error(`TVDB搜索失败:${error.message}`)
     } finally {
       setSearchTvdbLoading(false)
     }
@@ -472,10 +493,10 @@ export const Library = () => {
         setDoubanResult(res?.data || [])
         setDoubanOpen(true)
       } else {
-        message.error('没有找到相关内容')
+        messageApi.error('没有找到相关内容')
       }
     } catch (error) {
-      message.error(`豆瓣搜索失败:${error.message}`)
+      messageApi.error(`豆瓣搜索失败:${error.message}`)
     } finally {
       setSearchDoubanLoading(false)
     }
@@ -496,10 +517,10 @@ export const Library = () => {
         setImdbResult(res?.data || [])
         setImdbOpen(true)
       } else {
-        message.error('没有找到相关内容')
+        messageApi.error('没有找到相关内容')
       }
     } catch (error) {
-      message.error(
+      messageApi.error(
         error.detail || `IMDB搜索失败: ${error.message || '未知错误'}`
       )
     } finally {
@@ -526,10 +547,10 @@ export const Library = () => {
         setEgidResult(res?.data || [])
         setEgidOpen(true)
       } else {
-        message.error('没有找到相关内容')
+        messageApi.error('没有找到相关内容')
       }
     } catch (error) {
-      message.error(`剧集组搜索失败:${error.message}`)
+      messageApi.error(`剧集组搜索失败:${error.message}`)
     } finally {
       setSearchEgidLoading(false)
     }
@@ -547,10 +568,10 @@ export const Library = () => {
         setAllEpisode(res?.data || {})
         setEpisodeOpen(true)
       } else {
-        message.error('没有找到相关分集')
+        messageApi.error('没有找到相关分集')
       }
     } catch (error) {
-      message.error('没有找到相关分集')
+      messageApi.error('没有找到相关分集')
     } finally {
       setSearchAllEpisodeLoading(false)
     }
@@ -570,10 +591,10 @@ export const Library = () => {
         setBgmResult(res?.data || [])
         setBgmOpen(true)
       } else {
-        message.error('没有找到相关内容')
+        messageApi.error('没有找到相关内容')
       }
     } catch (error) {
-      message.error(`BGM搜索失败:${error.message}`)
+      messageApi.error(`BGM搜索失败:${error.message}`)
     } finally {
       setSearchBgmLoading(false)
     }
@@ -585,12 +606,15 @@ export const Library = () => {
         loading={loading}
         title="弹幕库"
         extra={
-          <>
+          <Space>
             <Input
               placeholder="搜索已收录的影视"
               onChange={e => setKeyword(e.target.value)}
             />
-          </>
+            <Button type="primary" onClick={() => setIsCreateModalOpen(true)}>
+              自定义影视条目
+            </Button>
+          </Space>
         }
       >
         {!!renderData?.length ? (
@@ -618,6 +642,11 @@ export const Library = () => {
           <Empty />
         )}
       </Card>
+      <CreateAnimeModal
+        open={isCreateModalOpen}
+        onCancel={() => setIsCreateModalOpen(false)}
+        onSuccess={handleCreateSuccess}
+      />
       <Modal
         title="编辑影视信息"
         open={editOpen}
@@ -683,9 +712,9 @@ export const Library = () => {
                         animeId,
                         imageUrl: imageUrl,
                       })
-                      message.success('海报已刷新并缓存成功！')
+                      messageApi.success('海报已刷新并缓存成功！')
                     } catch (error) {
-                      message.error(`刷新海报失败: ${error.message}`)
+                      messageApi.error(`刷新海报失败: ${error.message}`)
                     }
                   }}
                 >
@@ -694,6 +723,22 @@ export const Library = () => {
               }
             />
           </Form.Item>
+          {!!fetchedMetadata?.imageUrl &&
+            fetchedMetadata?.imageUrl !== imageUrl && (
+              <Form.Item className="text-right">
+                <Button
+                  className="cursor-pointer"
+                  onClick={() => {
+                    form.setFieldsValue({
+                      imageUrl: fetchedMetadata.imageUrl,
+                    })
+                  }}
+                >
+                  应用URL
+                </Button>
+              </Form.Item>
+            )}
+
           <Form.Item name="tmdbId" label="TMDB ID">
             <Input.Search
               placeholder="例如：1396"
@@ -911,6 +956,7 @@ export const Library = () => {
           pagination={{
             pageSize: 4,
             showSizeChanger: false,
+            hideOnSinglePage: true,
           }}
           renderItem={(item, index) => {
             return (
@@ -940,6 +986,7 @@ export const Library = () => {
                           currentId: item.id,
                         })
                         form.setFieldsValue({ tmdbId: res.data.id })
+
                         setFetchedMetadata(res.data)
                         setTmdbOpen(false)
                       }}
@@ -967,6 +1014,7 @@ export const Library = () => {
           pagination={{
             pageSize: 4,
             showSizeChanger: false,
+            hideOnSinglePage: true,
           }}
           renderItem={(item, index) => {
             return (
@@ -995,6 +1043,7 @@ export const Library = () => {
                           currentId: item.id,
                         })
                         form.setFieldsValue({ imdbId: res.data.id })
+
                         setFetchedMetadata(res.data)
                         setImdbOpen(false)
                       }}
@@ -1022,6 +1071,7 @@ export const Library = () => {
           pagination={{
             pageSize: 4,
             showSizeChanger: false,
+            hideOnSinglePage: true,
           }}
           renderItem={(item, index) => {
             return (
@@ -1077,6 +1127,7 @@ export const Library = () => {
           pagination={{
             pageSize: 4,
             showSizeChanger: false,
+            hideOnSinglePage: true,
           }}
           renderItem={(item, index) => {
             return (
@@ -1130,6 +1181,7 @@ export const Library = () => {
           pagination={{
             pageSize: 4,
             showSizeChanger: false,
+            hideOnSinglePage: true,
           }}
           renderItem={(item, index) => {
             return (
@@ -1166,6 +1218,7 @@ export const Library = () => {
           pagination={{
             pageSize: 4,
             showSizeChanger: false,
+            hideOnSinglePage: true,
           }}
           renderItem={(item, index) => {
             return (
@@ -1221,6 +1274,7 @@ export const Library = () => {
           pagination={{
             pageSize: 4,
             showSizeChanger: false,
+            hideOnSinglePage: true,
           }}
           renderItem={(item, index) => {
             return (

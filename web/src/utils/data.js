@@ -51,3 +51,11 @@ export function parseSearchKeyword(keyword) {
   }
   return { title: keyword, season: null, episode: null }
 }
+
+export function isUrl(str) {
+  // 正则表达式匹配URL格式
+  const urlRegex = /^(https?:\/\/)?([\da-z.-]+)\.([a-z.]{2,6})([\/\w.-]*)*\/?$/i
+
+  // 测试字符串是否匹配正则表达式
+  return urlRegex.test(str)
+}

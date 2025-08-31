@@ -3,7 +3,9 @@ import logging
 import re
 import secrets
 from datetime import datetime, timedelta, timezone
-from typing import List, Optional, Dict, Any, Type
+from typing import List, Optional, Dict, Any, Type, Tuple
+import xml.etree.ElementTree as ET
+from pathlib import Path
 
 from sqlalchemy import select, func, delete, update, and_, or_, text, distinct, case
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
@@ -14,12 +16,53 @@ from sqlalchemy.sql.elements import ColumnElement
 
 from . import models
 from .orm_models import (
-    Anime, AnimeSource, Episode, Comment, User, Scraper, AnimeMetadata, Config, CacheData, ApiToken, TokenAccessLog, UaRule, BangumiAuth, OauthState, AnimeAlias, TmdbEpisodeMapping, ScheduledTask, TaskHistory, MetadataSource, ExternalApiLog
+    Anime, AnimeSource, Episode, User, Scraper, AnimeMetadata, Config, CacheData, ApiToken, TokenAccessLog, UaRule, BangumiAuth, OauthState, AnimeAlias, TmdbEpisodeMapping, ScheduledTask, TaskHistory, MetadataSource, ExternalApiLog
 , RateLimitState)
 from .config import settings
+from .danmaku_parser import parse_dandan_xml_to_comments
 
 logger = logging.getLogger(__name__)
 
+# --- 新增：文件存储相关常量和辅助函数 ---
+DANMAKU_BASE_DIR = Path(__file__).parent.parent / "config" / "danmaku"
+
+def _generate_xml_from_comments(
+    comments: List[Dict[str, Any]], 
+    episode_id: int, 
+    provider_name: Optional[str] = "misaka",
+    chat_server: Optional[str] = "danmaku.misaka.org"
+) -> str:
+    """根据弹幕字典列表生成符合dandanplay标准的XML字符串。"""
+    root = ET.Element('i')
+    ET.SubElement(root, 'chatserver').text = chat_server
+    ET.SubElement(root, 'chatid').text = str(episode_id)
+    ET.SubElement(root, 'mission').text = '0'
+    ET.SubElement(root, 'maxlimit').text = '2000'
+    ET.SubElement(root, 'source').text = 'k-v' # 保持与官方格式一致
+    # 新增字段
+    ET.SubElement(root, 'sourceprovider').text = provider_name
+    ET.SubElement(root, 'datasize').text = str(len(comments))
+    
+    for comment in comments:
+        p_attr = str(comment.get('p', ''))
+        d = ET.SubElement(root, 'd', p=p_attr)
+        d.text = comment.get('m', '')
+    return ET.tostring(root, encoding='unicode', xml_declaration=True)
+
+def _get_fs_path_from_web_path(web_path: Optional[str]) -> Optional[Path]:
+    """
+    将Web路径（例如 /data/danmaku/1/2.xml 或 /danmaku/1/2.xml）转换为文件系统路径。
+    这个辅助函数通过查找 '/danmaku/' 标记来健壮地处理新旧两种路径格式。
+    """
+    if not web_path:
+        return None
+    
+    if '/danmaku/' in web_path:
+        relative_part = web_path.split('/danmaku/', 1)[1]
+        return DANMAKU_BASE_DIR / relative_part
+    
+    logger.warning(f"无法从Web路径 '{web_path}' 解析文件系统路径，因为它不包含 '/danmaku/'。")
+    return None
 # --- Anime & Library ---
 
 async def get_library_anime(session: AsyncSession) -> List[Dict[str, Any]]:
@@ -47,6 +90,35 @@ async def get_library_anime(session: AsyncSession) -> List[Dict[str, Any]]:
     )
     result = await session.execute(stmt)
     return [dict(row) for row in result.mappings()]
+
+async def get_library_anime_by_id(session: AsyncSession, anime_id: int) -> Optional[Dict[str, Any]]:
+    """
+    Gets a single anime from the library by its ID, with counts.
+    """
+    stmt = (
+        select(
+            Anime.id.label("animeId"),
+            Anime.localImagePath.label("localImagePath"),
+            Anime.imageUrl.label("imageUrl"),
+            Anime.title,
+            Anime.type,
+            Anime.season,
+            Anime.year,
+            Anime.createdAt.label("createdAt"),
+            case(
+                (Anime.type == 'movie', 1),
+                else_=func.coalesce(func.max(Episode.episodeIndex), 0)
+            ).label("episodeCount"),
+            func.count(distinct(AnimeSource.id)).label("sourceCount")
+        )
+        .join(AnimeSource, Anime.id == AnimeSource.animeId, isouter=True)
+        .join(Episode, AnimeSource.id == Episode.sourceId, isouter=True)
+        .where(Anime.id == anime_id)
+        .group_by(Anime.id)
+    )
+    result = await session.execute(stmt)
+    row = result.mappings().one_or_none()
+    return dict(row) if row else None
 
 async def get_last_episode_for_source(session: AsyncSession, sourceId: int) -> Optional[Dict[str, Any]]:
     """获取指定源的最后一个分集。"""
@@ -107,6 +179,56 @@ async def get_or_create_anime(session: AsyncSession, title: str, media_type: str
     await session.flush() # 使用 flush 获取新ID，但不提交事务
     return new_anime.id
 
+async def create_anime(session: AsyncSession, anime_data: models.AnimeCreate) -> Anime:
+    """
+    Manually creates a new anime entry in the database.
+    """
+    # Check if an anime with the same title and season already exists
+    existing_anime = await find_anime_by_title_and_season(session, anime_data.title, anime_data.season)
+    if existing_anime:
+        raise ValueError(f"作品 '{anime_data.title}' (第 {anime_data.season} 季) 已存在。")
+
+    new_anime = Anime(
+        title=anime_data.title,
+        type=anime_data.type,
+        season=anime_data.season,
+        year=anime_data.year,
+        imageUrl=anime_data.imageUrl
+    )
+    session.add(new_anime)
+    await session.flush()
+    
+    # Create associated metadata and alias records
+    new_metadata = AnimeMetadata(animeId=new_anime.id)
+    new_alias = AnimeAlias(animeId=new_anime.id)
+    session.add_all([new_metadata, new_alias])
+    
+    await session.flush()
+    await session.refresh(new_anime)
+    return new_anime
+
+async def update_anime_aliases(session: AsyncSession, anime_id: int, payload: Any):
+    """
+    Updates the aliases for a given anime.
+    The payload can be any object with the alias attributes.
+    """
+    stmt = select(AnimeAlias).where(AnimeAlias.animeId == anime_id)
+    result = await session.execute(stmt)
+    alias_record = result.scalar_one_or_none()
+
+    if not alias_record:
+        alias_record = AnimeAlias(animeId=anime_id)
+        session.add(alias_record)
+    
+    alias_record.nameEn = getattr(payload, 'nameEn', alias_record.nameEn)
+    alias_record.nameJp = getattr(payload, 'nameJp', alias_record.nameJp)
+    alias_record.nameRomaji = getattr(payload, 'nameRomaji', alias_record.nameRomaji)
+    alias_record.aliasCn1 = getattr(payload, 'aliasCn1', alias_record.aliasCn1)
+    alias_record.aliasCn2 = getattr(payload, 'aliasCn2', alias_record.aliasCn2)
+    alias_record.aliasCn3 = getattr(payload, 'aliasCn3', alias_record.aliasCn3)
+    
+    await session.flush()
+
 async def update_anime_details(session: AsyncSession, anime_id: int, update_data: models.AnimeDetailUpdate) -> bool:
     """在事务中更新番剧的核心信息、元数据和别名。"""
     anime = await session.get(Anime, anime_id, options=[selectinload(Anime.metadataRecord), selectinload(Anime.aliases)])
@@ -146,6 +268,7 @@ async def update_anime_details(session: AsyncSession, anime_id: int, update_data
 
 async def delete_anime(session: AsyncSession, anime_id: int) -> bool:
     """删除一个作品及其所有关联数据（通过级联删除）。"""
+    import shutil
     anime = await session.get(Anime, anime_id)
     if anime:
         await session.delete(anime)
@@ -427,14 +550,6 @@ async def get_related_episode_ids(session: AsyncSession, anime_id: int, episode_
     result = await session.execute(stmt)
     return result.scalars().all()
 
-async def fetch_comments_for_episodes(session: AsyncSession, episode_ids: List[int]) -> List[Dict[str, Any]]:
-    """
-    获取多个分集ID的所有弹幕。
-    """
-    stmt = select(Comment.cid, Comment.p, Comment.m).where(Comment.episodeId.in_(episode_ids))
-    result = await session.execute(stmt)
-    return [dict(row) for row in result.mappings()]
-
 async def get_anime_details_for_dandan(session: AsyncSession, anime_id: int) -> Optional[Dict[str, Any]]:
     """获取番剧的详细信息及其所有分集，用于dandanplay API。"""
     anime_stmt = (
@@ -518,25 +633,39 @@ async def update_source_media_id(session: AsyncSession, source_id: int, new_medi
     await session.execute(stmt)
     # 注意：这里不 commit，由调用方（任务）来决定何时提交事务
 
-async def update_metadata_if_empty(session: AsyncSession, anime_id: int, tmdbId: Optional[str], imdbId: Optional[str], tvdbId: Optional[str], doubanId: Optional[str], bangumiId: Optional[str] = None, tmdbEpisodeGroupId: Optional[str] = None):
-    """仅当字段为空时，才更新番剧的元数据ID。"""
+async def update_metadata_if_empty(
+    session: AsyncSession,
+    anime_id: int,
+    *,
+    tmdb_id: Optional[str] = None,
+    imdb_id: Optional[str] = None,
+    tvdb_id: Optional[str] = None,
+    douban_id: Optional[str] = None,
+    bangumi_id: Optional[str] = None,
+    tmdb_episode_group_id: Optional[str] = None
+):
+    """
+    如果 anime_metadata 记录中的字段为空，则使用提供的值进行更新。
+    如果记录不存在，则创建一个新记录。
+    使用关键字参数以提高可读性和安全性。
+    """
     stmt = select(AnimeMetadata).where(AnimeMetadata.animeId == anime_id)
     result = await session.execute(stmt)
-    metadata = result.scalar_one_or_none()
+    metadata_record = result.scalar_one_or_none()
 
-    if not metadata:
-        return
+    if not metadata_record:
+        metadata_record = AnimeMetadata(animeId=anime_id)
+        session.add(metadata_record)
+        await session.flush()
 
-    updated = False
-    if not metadata.tmdbId and tmdbId: metadata.tmdbId = tmdbId; updated = True
-    if not metadata.tmdbEpisodeGroupId and tmdbEpisodeGroupId: metadata.tmdbEpisodeGroupId = tmdbEpisodeGroupId; updated = True
-    if not metadata.imdbId and imdbId: metadata.imdbId = imdbId; updated = True
-    if not metadata.tvdbId and tvdbId: metadata.tvdbId = tvdbId; updated = True
-    if not metadata.doubanId and doubanId: metadata.doubanId = doubanId; updated = True
-    if not metadata.bangumiId and bangumiId: metadata.bangumiId = bangumiId; updated = True
+    if tmdb_id and not metadata_record.tmdbId: metadata_record.tmdbId = tmdb_id
+    if imdb_id and not metadata_record.imdbId: metadata_record.imdbId = imdb_id
+    if tvdb_id and not metadata_record.tvdbId: metadata_record.tvdbId = tvdb_id
+    if douban_id and not metadata_record.doubanId: metadata_record.doubanId = douban_id
+    if bangumi_id and not metadata_record.bangumiId: metadata_record.bangumiId = bangumi_id
+    if tmdb_episode_group_id and not metadata_record.tmdbEpisodeGroupId: metadata_record.tmdbEpisodeGroupId = tmdb_episode_group_id
 
-    if updated:
-        await session.commit()
+    await session.flush()
 
 # --- User & Auth ---
 
@@ -592,16 +721,25 @@ async def check_episode_exists(session: AsyncSession, episode_id: int) -> bool:
     return result.scalar_one_or_none() is not None
 
 async def fetch_comments(session: AsyncSession, episode_id: int) -> List[Dict[str, Any]]:
-    """获取指定分集的所有弹幕"""
-    stmt = select(Comment.cid, Comment.p, Comment.m).where(Comment.episodeId == episode_id)
-    result = await session.execute(stmt)
-    return [dict(row) for row in result.mappings()]
-
-async def get_existing_comment_cids(session: AsyncSession, episode_id: int) -> set:
-    """获取指定分集已存在的所有弹幕 cid。"""
-    stmt = select(Comment.cid).where(Comment.episodeId == episode_id)
-    result = await session.execute(stmt)
-    return set(result.scalars().all())
+    """从XML文件获取弹幕。"""
+    episode = await session.get(Episode, episode_id)
+    if not episode or not episode.danmakuFilePath:
+        return []
+    
+    try:
+        absolute_path = _get_fs_path_from_web_path(episode.danmakuFilePath)
+        if not absolute_path:
+            return [] # 辅助函数会记录警告
+        
+        if not absolute_path.exists():
+            logger.warning(f"数据库记录了弹幕文件路径，但文件不存在: {absolute_path}")
+            return []
+            
+        xml_content = absolute_path.read_text(encoding='utf-8')
+        return parse_dandan_xml_to_comments(xml_content)
+    except Exception as e:
+        logger.error(f"读取或解析弹幕文件失败: {episode.danmakuFilePath}。错误: {e}", exc_info=True)
+        return []
 
 async def create_episode_if_not_exists(session: AsyncSession, anime_id: int, source_id: int, episode_index: int, title: str, url: Optional[str], provider_episode_id: str) -> int:
     """如果分集不存在则创建，并返回其确定性的ID。"""
@@ -630,50 +768,47 @@ async def create_episode_if_not_exists(session: AsyncSession, anime_id: int, sou
     await session.flush() # 使用 flush 获取新ID，但不提交事务
     return new_episode_id
 
-async def bulk_insert_comments(session: AsyncSession, episode_id: int, comments: List[Dict[str, Any]]) -> int:
-    """批量插入弹幕，利用 INSERT IGNORE 忽略重复弹幕"""
+async def write_danmaku_to_file(
+    session: AsyncSession,
+    episode_id: int,
+    comments: List[Dict[str, Any]]
+) -> Tuple[int, str]:
+    """将弹幕写入XML文件，并返回新增数量和文件路径。"""
     if not comments:
-        return 0
+        return 0, ""
 
-    # 2. 获取当前弹幕数量
-    initial_count_stmt = select(func.count()).select_from(Comment).where(Comment.episodeId == episode_id)
-    initial_count = (await session.execute(initial_count_stmt)).scalar_one()
+    episode = await session.get(
+        Episode, 
+        episode_id, 
+        options=[selectinload(Episode.source).selectinload(AnimeSource.anime)]
+    )
+    if not episode:
+        raise ValueError(f"找不到ID为 {episode_id} 的分集")
 
-    # 3. 分块执行 upsert 操作以避免参数数量超限
-    dialect = session.bind.dialect.name
-    # 每批插入5000条，每条5个字段，总参数为25000，低于PostgreSQL的32767限制
-    chunk_size = 5000
+    anime_id = episode.source.anime.id
+    source_id = episode.source.id
 
-    for i in range(0, len(comments), chunk_size):
-        chunk = comments[i:i + chunk_size]
-        data_to_insert = [
-            {"episodeId": episode_id, "cid": c['cid'], "p": c['p'], "m": c['m'], "t": c['t']}
-            for c in chunk
-        ]
-
-        if dialect == 'mysql':
-            stmt = mysql_insert(Comment).values(data_to_insert)
-            stmt = stmt.on_duplicate_key_update(cid=stmt.inserted.cid) # A no-op update to trigger IGNORE behavior
-        elif dialect == 'postgresql':
-            stmt = postgresql_insert(Comment).values(data_to_insert)
-            stmt = stmt.on_conflict_do_nothing(index_elements=['episode_id', 'cid'])
-        else:
-            raise NotImplementedError(f"批量插入弹幕功能尚未为数据库类型 '{dialect}' 实现。")
-        
-        await session.execute(stmt)
-
-    await session.flush() # 确保所有分块操作完成
-
-    # 4. 重新计算总数并更新
-    final_count_stmt = select(func.count()).select_from(Comment).where(Comment.episodeId == episode_id)
-    final_count = (await session.execute(final_count_stmt)).scalar_one()
+    # 新增：获取原始弹幕服务器信息
+    provider_name = episode.source.providerName
+    # 这是一个简化的映射，您可以根据需要扩展
+    chat_server_map = {
+        "bilibili": "comment.bilibili.com"
+    }
+    xml_content = _generate_xml_from_comments(comments, episode_id, provider_name, chat_server_map.get(provider_name, "danmaku.misaka.org"))
     
-    newly_inserted_count = final_count - initial_count
-
-    if newly_inserted_count > 0:
-        update_stmt = update(Episode).where(Episode.id == episode_id).values(commentCount=final_count)
-        await session.execute(update_stmt)
-    return newly_inserted_count
+    # 修正：统一文件路径结构，与 tasks.py 保持一致（不包含 source_id）
+    web_path = f"/danmaku/{anime_id}/{episode_id}.xml"
+    absolute_path = DANMAKU_BASE_DIR / str(anime_id) / f"{episode_id}.xml"
+    
+    try:
+        absolute_path.parent.mkdir(parents=True, exist_ok=True)
+        absolute_path.write_text(xml_content, encoding='utf-8')
+        logger.info(f"弹幕已成功写入文件: {absolute_path}")
+    except OSError as e:
+        logger.error(f"写入弹幕文件失败: {absolute_path}。错误: {e}")
+        raise
+        
+    return len(comments), web_path
 
 # ... (rest of the file needs to be refactored similarly) ...
 
@@ -727,7 +862,12 @@ async def get_episodes_for_source(session: AsyncSession, source_id: int) -> List
     return [dict(row) for row in result.mappings()]
 async def get_episode_provider_info(session: AsyncSession, episode_id: int) -> Optional[Dict[str, Any]]:
     stmt = (
-        select(AnimeSource.providerName, Episode.providerEpisodeId)
+        select(
+            AnimeSource.providerName,
+            AnimeSource.animeId,
+            Episode.providerEpisodeId,
+            Episode.danmakuFilePath
+        )
         .join(AnimeSource, Episode.sourceId == AnimeSource.id)
         .where(Episode.id == episode_id)
     )
@@ -736,16 +876,34 @@ async def get_episode_provider_info(session: AsyncSession, episode_id: int) -> O
     return dict(row) if row else None
 
 async def clear_source_data(session: AsyncSession, source_id: int):
-    episodes_to_delete = await session.execute(select(Episode.id).where(Episode.sourceId == source_id))
-    episode_ids = episodes_to_delete.scalars().all()
-    if episode_ids:
-        await session.execute(delete(Comment).where(Comment.episodeId.in_(episode_ids)))
-        await session.execute(delete(Episode).where(Episode.id.in_(episode_ids)))
+    """Deletes all episodes and their danmaku files for a given source."""
+    import shutil
+    source = await session.get(AnimeSource, source_id)
+    if not source:
+        return
+    
+    source_danmaku_dir = DANMAKU_BASE_DIR / str(source.animeId) / str(source_id)
+    if source_danmaku_dir.exists() and source_danmaku_dir.is_dir():
+        shutil.rmtree(source_danmaku_dir)
+    await session.execute(delete(Episode).where(Episode.sourceId == source_id))
     await session.commit()
 
 async def clear_episode_comments(session: AsyncSession, episode_id: int):
-    await session.execute(delete(Comment).where(Comment.episodeId == episode_id))
-    await session.execute(update(Episode).where(Episode.id == episode_id).values(commentCount=0))
+    """Deletes the danmaku file for an episode and resets its count."""
+    episode = await session.get(Episode, episode_id)
+    if not episode:
+        return
+    
+    if episode.danmakuFilePath:
+        fs_path = _get_fs_path_from_web_path(episode.danmakuFilePath)
+        if fs_path and fs_path.is_file():
+            try:
+                fs_path.unlink()
+            except OSError as e:
+                logger.error(f"删除弹幕文件失败: {fs_path}。错误: {e}")
+    
+    episode.danmakuFilePath = None
+    episode.commentCount = 0
     await session.commit()
 
 async def get_anime_full_details(session: AsyncSession, anime_id: int) -> Optional[Dict[str, Any]]:
@@ -789,14 +947,28 @@ async def save_tmdb_episode_group_mappings(session: AsyncSession, tmdb_tv_id: in
 async def delete_anime_source(session: AsyncSession, source_id: int) -> bool:
     source = await session.get(AnimeSource, source_id)
     if source:
+        # 修正：逐个删除文件，而不是删除整个目录，以提高健壮性并与 tasks.py 保持一致
+        episodes_to_delete_res = await session.execute(
+            select(Episode.danmakuFilePath).where(Episode.sourceId == source_id)
+        )
+        for file_path_str in episodes_to_delete_res.scalars().all():
+            if fs_path := _get_fs_path_from_web_path(file_path_str):
+                if fs_path.is_file():
+                    fs_path.unlink(missing_ok=True)
+
         await session.delete(source)
         await session.commit()
         return True
     return False
 
 async def delete_episode(session: AsyncSession, episode_id: int) -> bool:
+    """删除一个分集及其弹幕文件。"""
     episode = await session.get(Episode, episode_id)
     if episode:
+        if episode.danmakuFilePath:
+            fs_path = _get_fs_path_from_web_path(episode.danmakuFilePath)
+            if fs_path and fs_path.is_file():
+                fs_path.unlink(missing_ok=True)
         await session.delete(episode)
         await session.commit()
         return True
@@ -811,8 +983,26 @@ async def reassociate_anime_sources(session: AsyncSession, source_anime_id: int,
     if not source_anime or not target_anime:
         return False
 
-    # 修正：遍历源列表的副本，以避免在迭代时修改集合
+    # 修正：遍历源列表的副本，并在移动数据库记录的同时，移动物理弹幕文件
     for src in list(source_anime.sources):
+        # 移动此源下的所有弹幕文件
+        episodes_res = await session.execute(select(Episode).where(Episode.sourceId == src.id))
+        episodes_to_move = episodes_res.scalars().all()
+        for ep in episodes_to_move:
+            if ep.danmakuFilePath:
+                old_fs_path = _get_fs_path_from_web_path(ep.danmakuFilePath)
+                # 新的Web路径将使用目标作品的ID
+                new_web_path = f"/danmaku/{target_anime_id}/{ep.id}.xml"
+                new_fs_path = DANMAKU_BASE_DIR / str(target_anime_id) / f"{ep.id}.xml"
+                
+                if old_fs_path and old_fs_path.is_file():
+                    try:
+                        new_fs_path.parent.mkdir(parents=True, exist_ok=True)
+                        old_fs_path.rename(new_fs_path)
+                        ep.danmakuFilePath = new_web_path # 更新数据库中的路径
+                    except OSError as e:
+                        logger.error(f"合并作品时移动弹幕文件失败: 从 {old_fs_path} 到 {new_fs_path}。错误: {e}")
+
         # 检查目标作品上是否已存在重复的数据源
         existing_target_source = await session.execute(
             select(AnimeSource).where(
@@ -831,7 +1021,7 @@ async def reassociate_anime_sources(session: AsyncSession, source_anime_id: int,
     return True
 
 async def update_episode_info(session: AsyncSession, episode_id: int, update_data: models.EpisodeInfoUpdate) -> bool:
-    """更新单个分集的信息。如果集数被修改，将重新生成ID并迁移关联的弹幕。"""
+    """更新单个分集的信息。如果集数被修改，将重命名弹幕文件并更新路径。"""
     # 使用 joinedload 高效地获取关联的 source 和 anime 信息 # type: ignore
     stmt = select(Episode).where(Episode.id == episode_id).options(joinedload(Episode.source).joinedload(AnimeSource.anime))
     result = await session.execute(stmt)
@@ -847,7 +1037,7 @@ async def update_episode_info(session: AsyncSession, episode_id: int, update_dat
         await session.commit()
         return True
 
-    # 情况2: 集数已改变，需要重新生成主键并迁移数据
+    # 情况2: 集数已改变，需要重新生成ID并移动文件
     # 1. 检查新集数是否已存在，避免冲突
     conflict_stmt = select(Episode.id).where(
         Episode.sourceId == episode.sourceId,
@@ -868,19 +1058,34 @@ async def update_episode_info(session: AsyncSession, episode_id: int, update_dat
     new_episode_id_str = f"25{episode.source.animeId:06d}{source_order:02d}{update_data.episodeIndex:04d}"
     new_episode_id = int(new_episode_id_str)
 
-    # 3. 创建一个新的分集对象
+    # 3. 重命名弹幕文件（如果存在）
+    new_web_path = None
+    if episode.danmakuFilePath:
+        old_absolute_path = _get_fs_path_from_web_path(episode.danmakuFilePath)
+        
+        # 修正：新的Web路径和文件系统路径应与 tasks.py 保持一致（不包含 source_id）
+        new_web_path = f"/danmaku/{episode.source.animeId}/{new_episode_id}.xml"
+        new_absolute_path = DANMAKU_BASE_DIR / str(episode.source.animeId) / f"{new_episode_id}.xml"
+        
+        if old_absolute_path and old_absolute_path.exists():
+            try:
+                new_absolute_path.parent.mkdir(parents=True, exist_ok=True)
+                old_absolute_path.rename(new_absolute_path)
+                logger.info(f"弹幕文件已重命名: {old_absolute_path} -> {new_absolute_path}")
+            except OSError as e:
+                logger.error(f"重命名弹幕文件失败: {e}")
+                new_web_path = episode.danmakuFilePath # 如果重命名失败，则保留旧路径
+    
+    # 4. 创建一个新的分集对象
     new_episode = Episode(
         id=new_episode_id, sourceId=episode.sourceId, episodeIndex=update_data.episodeIndex,
         title=update_data.title, sourceUrl=update_data.sourceUrl,
-        providerEpisodeId=episode.providerEpisodeId, fetchedAt=episode.fetchedAt, commentCount=episode.commentCount
+        providerEpisodeId=episode.providerEpisodeId, fetchedAt=episode.fetchedAt, 
+        commentCount=episode.commentCount, danmakuFilePath=new_web_path
     )
     session.add(new_episode)
-    await session.flush()  # 插入新记录以获取其ID
-
-    # 4. 将旧分集的弹幕关联到新分集
-    await session.execute(update(Comment).where(Comment.episodeId == episode_id).values(episodeId=new_episode_id))
-
-    # 5. 删除旧的分集记录
+    
+    # 5. 删除旧的分集记录 (由于没有弹幕关联，可以直接删除)
     await session.delete(episode)
     await session.commit()
     return True
@@ -1116,6 +1321,13 @@ async def update_episode_fetch_time(session: AsyncSession, episode_id: int):
     await session.execute(update(Episode).where(Episode.id == episode_id).values(fetchedAt=datetime.now(timezone.utc)))
     await session.commit()
 
+async def update_episode_danmaku_info(session: AsyncSession, episode_id: int, file_path: str, count: int):
+    """更新分集的弹幕文件路径和弹幕数量。"""
+    stmt = update(Episode).where(Episode.id == episode_id).values(
+        danmakuFilePath=file_path, commentCount=count, fetchedAt=datetime.now(timezone.utc)
+    )
+    await session.execute(stmt)
+    await session.flush()
 # --- API Token Management ---
 
 async def get_all_api_tokens(session: AsyncSession) -> List[Dict[str, Any]]:
@@ -1352,28 +1564,24 @@ async def update_anime_tmdb_group_id(session: AsyncSession, anime_id: int, group
     await session.commit()
 
 async def update_anime_aliases_if_empty(session: AsyncSession, anime_id: int, aliases: Dict[str, Any]):
-    alias_record = await session.get(AnimeAlias, anime_id)
+    # 修正：使用 select().where() 而不是 session.get()，因为 anime_id 不是主键
+    stmt = select(AnimeAlias).where(AnimeAlias.animeId == anime_id)
+    result = await session.execute(stmt)
+    alias_record = result.scalar_one_or_none()
+
     if not alias_record: return
 
-    updated = False
-    if not alias_record.nameEn and aliases.get('nameEn'):
-        alias_record.nameEn = aliases['nameEn']; updated = True
-    if not alias_record.nameJp and aliases.get('nameJp'):
-        alias_record.nameJp = aliases['nameJp']; updated = True
-    if not alias_record.nameRomaji and aliases.get('nameRomaji'):
-        alias_record.nameRomaji = aliases['nameRomaji']; updated = True
+    if not alias_record.nameEn and aliases.get('nameEn'): alias_record.nameEn = aliases['nameEn']
+    if not alias_record.nameJp and aliases.get('nameJp'): alias_record.nameJp = aliases['nameJp']
+    if not alias_record.nameRomaji and aliases.get('nameRomaji'): alias_record.nameRomaji = aliases['nameRomaji']
     
     cn_aliases = aliases.get('aliases_cn', [])
-    if not alias_record.aliasCn1 and len(cn_aliases) > 0:
-        alias_record.aliasCn1 = cn_aliases[0]; updated = True
-    if not alias_record.aliasCn2 and len(cn_aliases) > 1:
-        alias_record.aliasCn2 = cn_aliases[1]; updated = True
-    if not alias_record.aliasCn3 and len(cn_aliases) > 2:
-        alias_record.aliasCn3 = cn_aliases[2]; updated = True
+    if not alias_record.aliasCn1 and len(cn_aliases) > 0: alias_record.aliasCn1 = cn_aliases[0]
+    if not alias_record.aliasCn2 and len(cn_aliases) > 1: alias_record.aliasCn2 = cn_aliases[1]
+    if not alias_record.aliasCn3 and len(cn_aliases) > 2: alias_record.aliasCn3 = cn_aliases[2]
 
-    if updated:
-        await session.commit()
-        logging.info(f"为作品 ID {anime_id} 更新了别名字段。")
+    await session.flush()
+    logging.info(f"为作品 ID {anime_id} 更新了别名字段。")
 
 async def get_scheduled_tasks(session: AsyncSession) -> List[Dict[str, Any]]:
     stmt = select(
@@ -1667,3 +1875,19 @@ async def purge_binary_logs(session: AsyncSession, days: int) -> str:
     msg = f"成功执行 PURGE BINARY LOGS，清除了 {days} 天前的日志。"
     logger.info(msg)
     return msg
+
+async def add_comments_from_xml(session: AsyncSession, episode_id: int, xml_content: str) -> int:
+    """
+    Parses XML content and adds the comments to a given episode.
+    Returns the number of comments added.
+    """
+    comments = parse_dandan_xml_to_comments(xml_content)
+    if not comments:
+        return 0
+    
+    added_count, file_path = await write_danmaku_to_file(session, episode_id, comments)
+    if file_path:
+        await update_episode_danmaku_info(session, episode_id, file_path, added_count)
+        await session.commit()
+    
+    return added_count

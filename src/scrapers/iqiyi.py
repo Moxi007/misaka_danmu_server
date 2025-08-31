@@ -230,22 +230,7 @@ class IqiyiScraper(BaseScraper):
     provider_name = "iqiyi"
     handled_domains = ["www.iqiyi.com"]
     referer = "https://www.iqiyi.com/"
-    _EPISODE_BLACKLIST_PATTERN = re.compile(r"加更|走心|解忧|纯享", re.IGNORECASE)
-    # 新增：合并了JS脚本中的过滤关键词，用于过滤搜索结果中的非正片内容
-    _SEARCH_JUNK_TITLE_PATTERN = re.compile(
-        r'纪录片|预告|花絮|专访|直拍|直播回顾|加更|走心|解忧|纯享|节点|解读|揭秘|赏析|速看|资讯|访谈|番外|短片|'
-        r'拍摄花絮|制作花絮|幕后花絮|未播花絮|独家花絮|花絮特辑|'
-        r'预告片|先导预告|终极预告|正式预告|官方预告|'
-        r'彩蛋片段|删减片段|未播片段|番外彩蛋|'
-        r'精彩片段|精彩看点|精彩回顾|精彩集锦|看点解析|看点预告|'
-        r'NG镜头|NG花絮|番外篇|番外特辑|'
-        r'制作特辑|拍摄特辑|幕后特辑|导演特辑|演员特辑|'
-        r'片尾曲|插曲|主题曲|背景音乐|OST|音乐MV|歌曲MV|'
-        r'前季回顾|剧情回顾|往期回顾|内容总结|剧情盘点|精选合集|剪辑合集|混剪视频|'
-        r'独家专访|演员访谈|导演访谈|主创访谈|媒体采访|发布会采访|'
-        r'抢先看|抢先版|试看版|即将上线',
-        re.IGNORECASE
-    )
+    _PROVIDER_SPECIFIC_BLACKLIST_DEFAULT = r"^(.*?)(抢先(看|版)?|加更(版)?|花絮|预告|特辑|彩蛋|专访|幕后|直播|纯享|未播|衍生|番外|会员(专享|加长)?|片花|预告|精华|看点|速看|解读|reaction|影评)(.*?)$"
     
     # --- 新增：用于新API的签名和ID转换 ---
     _xor_key: ClassVar[int] = 0x75706971676c
@@ -443,7 +428,7 @@ class IqiyiScraper(BaseScraper):
                 if not album.title or not album.link_id:
                     continue
 
-                if self._SEARCH_JUNK_TITLE_PATTERN.search(album.title):
+                if self._GLOBAL_SEARCH_JUNK_TITLE_PATTERN.search(album.title):
                     self.logger.debug(f"爱奇艺 (桌面API): 根据标题黑名单过滤掉 '{album.title}'")
                     continue
                 
@@ -499,6 +484,12 @@ class IqiyiScraper(BaseScraper):
         if cached_results:
             self.logger.info(f"爱奇艺: 从缓存中命中基础搜索结果 (title='{search_title}')")
             all_results = [models.ProviderSearchInfo.model_validate(r) for r in cached_results]
+            # 关键修复：当从缓存加载时，必须使用当前请求的集数更新结果。
+            # 之前的逻辑会返回缓存中旧的集数，导致此BUG。
+            current_episode_from_request = episode_info.get("episode") if episode_info else None
+            if current_episode_from_request is not None:
+                for result in all_results:
+                    result.currentEpisodeIndex = current_episode_from_request
         else:
             self.logger.info(f"爱奇艺: 缓存未命中，正在为标题 '{search_title}' 执行网络搜索...")
             all_results = await self._perform_network_search(search_title, episode_info)
@@ -566,7 +557,7 @@ class IqiyiScraper(BaseScraper):
                     continue
 
                 # 新增：根据标题过滤掉非正片内容
-                if album.album_title and self._SEARCH_JUNK_TITLE_PATTERN.search(album.album_title):
+                if album.album_title and self._GLOBAL_SEARCH_JUNK_TITLE_PATTERN.search(album.album_title):
                     self.logger.debug(f"爱奇艺: 根据标题黑名单过滤掉 '{album.album_title}'")
                     continue
 
@@ -615,7 +606,19 @@ class IqiyiScraper(BaseScraper):
             return None
         
         link_id = link_id_match.group(1)
-        return await self._get_legacy_video_base_info(link_id)
+        base_info = await self._get_legacy_video_base_info(link_id)
+        if not base_info:
+            return None
+
+        channel = base_info.channel_name or ""
+        media_type = "movie" if channel == "电影" else "tv_series"
+        return models.ProviderSearchInfo(
+            provider=self.provider_name,
+            mediaId=link_id,
+            title=base_info.video_name,
+            type=media_type,
+            season=get_season_from_title(base_info.video_name)
+        )
 
     async def _get_episodes_v3(self, media_id: str) -> List[models.ProviderEpisodeInfo]:
         """方案 #1: 使用新的 base_info API 获取分集列表。"""
@@ -661,21 +664,6 @@ class IqiyiScraper(BaseScraper):
             self.logger.error(f"爱奇艺 (v3): 获取分集时发生错误: {e}", exc_info=True)
             return []
 
-    async def _get_legacy_video_base_info_v2(self, link_id: str) -> Optional[IqiyiLegacyVideoInfo]:
-        base_info = await self._get_legacy_video_base_info(link_id)
-        if not base_info:
-            return None
-
-        channel = base_info.channel_name or ""
-        media_type = "movie" if channel == "电影" else "tv_series"
-
-        return models.ProviderSearchInfo(
-            provider=self.provider_name,
-            mediaId=link_id,
-            title=base_info.video_name,
-            type=media_type,
-            season=get_season_from_title(base_info.video_name)
-        )
     async def _get_tvid_from_link_id(self, link_id: str) -> Optional[str]:
         """
         新增：使用官方API将视频链接ID解码为tvid。
@@ -987,82 +975,20 @@ class IqiyiScraper(BaseScraper):
 
     async def _filter_and_finalize_episodes(self, episodes: List[models.ProviderEpisodeInfo], target_episode_index: Optional[int]) -> List[models.ProviderEpisodeInfo]:
         """对分集列表应用黑名单过滤并返回最终结果。"""
-        # 应用自定义黑名单
+        # 统一过滤逻辑
         blacklist_pattern = await self.get_episode_blacklist_pattern()
         if blacklist_pattern:
             original_count = len(episodes)
             episodes = [ep for ep in episodes if not blacklist_pattern.search(ep.title)]
             if original_count > len(episodes):
-                self.logger.info(f"Iqiyi: 根据自定义黑名单规则过滤掉了 {original_count - len(episodes)} 个分集。")
-        
-        # 应用内置黑名单
-        if self._EPISODE_BLACKLIST_PATTERN:
-            original_count = len(episodes)
-            episodes = [ep for ep in episodes if not self._EPISODE_BLACKLIST_PATTERN.search(ep.title)]
-            if original_count > len(episodes):
-                self.logger.info(f"Iqiyi: 根据内置黑名单规则过滤掉了 {original_count - len(episodes)} 个分集。")
+                self.logger.info(f"Iqiyi: 根据黑名单规则过滤掉了 {original_count - len(episodes)} 个分集。")
 
         if target_episode_index:
             return [ep for ep in episodes if ep.episodeIndex == target_episode_index]
         return episodes
 
+
     async def _get_danmu_content_by_mat(self, tv_id: str, mat: int) -> List[IqiyiComment]:
-        if len(tv_id) < 4: return []
-        
-        s1 = tv_id[-4:-2]
-        s2 = tv_id[-2:]
-        url = f"http://cmts.iqiyi.com/bullet/{s1}/{s2}/{tv_id}_300_{mat}.z"
-        
-        try:
-            response = await self._request("GET", url)
-            if await self._should_log_responses():
-                scraper_responses_logger.debug(f"iQiyi Danmaku Segment Response (tvId={tv_id}, mat={mat}): status={response.status_code}")
-            if response.status_code == 404:
-                self.logger.info(f"爱奇艺: 找不到 tvId {tv_id} 的弹幕分段 {mat}，停止获取。")
-                return [] # 404 means no more segments
-            response.raise_for_status()
-
-            # 根据用户的反馈，恢复为标准的 zlib 解压方式。
-            decompressed_data = zlib.decompress(response.content)
-
-            # 增加显式的UTF-8解析器以提高健壮性
-            parser = ET.XMLParser(encoding="utf-8")
-            root = ET.fromstring(decompressed_data, parser=parser)
-            
-            comments = []
-            # 关键修复：根据日志，弹幕信息在 <bulletInfo> 标签内
-            for item in root.findall('.//bulletInfo'):
-                content_node = item.find('content')
-                show_time_node = item.find('showTime')
-
-                # 核心字段必须存在
-                if not (content_node is not None and content_node.text and show_time_node is not None and show_time_node.text):
-                    continue
-                
-                # 安全地获取可选字段
-                content_id_node = item.find('contentId')
-                color_node = item.find('color')
-                user_info_node = item.find('userInfo')
-                uid_node = user_info_node.find('uid') if user_info_node is not None else None
-
-                comments.append(IqiyiComment(
-                    contentId=content_id_node.text if content_id_node is not None and content_id_node.text else "0",
-                    content=content_node.text,
-                    showTime=int(show_time_node.text),
-                    color=color_node.text if color_node is not None and color_node.text else "ffffff",
-                    userInfo=IqiyiUserInfo(uid=uid_node.text) if uid_node is not None and uid_node.text else None
-                ))
-            return comments
-        except zlib.error:
-            self.logger.warning(f"爱奇艺: 解压 tvId {tv_id} 的弹幕分段 {mat} 失败，文件可能为空或已损坏。")
-        except ET.ParseError:
-            self.logger.warning(f"爱奇艺: 解析 tvId {tv_id} 的弹幕分段 {mat} 的XML失败。")
-        except Exception as e:
-            self.logger.error(f"爱奇艺: 获取 tvId {tv_id} 的弹幕分段 {mat} 时出错: {e}", exc_info=True)
-        
-        return []
-
-    async def _get_danmu_content_by_mat_test(self, tv_id: str, mat: int) -> List[IqiyiComment]:
         """根据tv_id和分段号获取弹幕内容"""
         if len(tv_id) < 4:
             self.logger.warning("tv_id长度不足4位，返回空")
@@ -1170,8 +1096,7 @@ class IqiyiScraper(BaseScraper):
                 progress = int((mat / total_mats) * 100) if total_mats > 0 else 100
                 await progress_callback(progress, f"正在获取第 {mat}/{total_mats} 分段")
 
-            # comments_in_mat = await self._get_danmu_content_by_mat(tv_id, mat)
-            comments_in_mat = await self._get_danmu_content_by_mat_test(tv_id, mat)
+            comments_in_mat = await self._get_danmu_content_by_mat(tv_id, mat)
             if not comments_in_mat:
                 break
             all_comments.extend(comments_in_mat)

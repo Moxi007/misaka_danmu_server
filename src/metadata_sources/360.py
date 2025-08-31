@@ -35,7 +35,7 @@ class So360SearchRes(BaseModel):
     rows: List[So360SearchResultItem] = Field(default_factory=list)
 
 class So360SearchResult(BaseModel):
-    longData: Optional[So360SearchRes] = Field(None, alias="longData")
+    longData: Optional[Union[So360SearchRes, List]] = Field(None, alias="longData")
 
 class So360SearchResponse(BaseModel):
     data: Optional[So360SearchResult] = None
@@ -108,7 +108,8 @@ class So360MetadataSource(BaseMetadataSource):
                 json_payload = json_text # 如果找不到括号，则假定它不是JSONP
             data = So360SearchResponse.model_validate(json.loads(json_payload))
             
-            if not data.data or not data.data.longData:
+            if not data.data or not data.data.longData or not isinstance(data.data.longData, So360SearchRes):
+                self.logger.info("360影视搜索未返回有效的 'longData' 对象，搜索结束。")
                 return []
 
             results: List[models.MetadataDetailsResponse] = []

@@ -95,6 +95,59 @@ async def _migrate_add_failover_enabled_to_metadata_sources(conn, db_type, db_na
         logger.info(f"成功添加列 'metadata_sources.is_failover_enabled'。")
     logger.info(f"迁移任务 '{migration_id}' 检查完成。")
 
+async def _migrate_alter_danmaku_file_path_length(conn, db_type, db_name):
+    """迁移任务: 确保 episode.danmaku_file_path 字段有足够的长度。"""
+    migration_id = "alter_danmaku_file_path_length"
+    new_length = 1024
+    logger.info(f"正在检查是否需要执行迁移: {migration_id}...")
+
+    if db_type == "mysql":
+        check_sql = text(f"SELECT CHARACTER_MAXIMUM_LENGTH FROM information_schema.columns WHERE table_schema = '{db_name}' AND table_name = 'episode' AND column_name = 'danmaku_file_path'")
+        alter_sql = text(f"ALTER TABLE episode MODIFY COLUMN `danmaku_file_path` VARCHAR({new_length})")
+    elif db_type == "postgresql":
+        check_sql = text("SELECT character_maximum_length FROM information_schema.columns WHERE table_name = 'episode' AND column_name = 'danmaku_file_path'")
+        alter_sql = text(f'ALTER TABLE episode ALTER COLUMN "danmaku_file_path" TYPE VARCHAR({new_length})')
+    else:
+        return
+
+    current_length = (await conn.execute(check_sql)).scalar_one_or_none()
+    
+    # 检查列是否存在及其长度是否小于期望值
+    if current_length is not None and current_length < new_length:
+        logger.info(f"列 'episode.danmaku_file_path' 当前长度为 {current_length}，小于目标长度 {new_length}。正在扩展...")
+        await conn.execute(alter_sql)
+        logger.info(f"成功将列 'episode.danmaku_file_path' 扩展到 {new_length}。")
+    else:
+        logger.info(f"列 'episode.danmaku_file_path' 无需扩展。")
+    logger.info(f"迁移任务 '{migration_id}' 检查完成。")
+
+async def _migrate_alter_source_url_to_text(conn, db_type, db_name):
+    """迁移任务: 确保 episode.source_url 字段为 TEXT 类型以支持长 URL。"""
+    migration_id = "alter_source_url_to_text"
+    logger.info(f"正在检查是否需要执行迁移: {migration_id}...")
+
+    if db_type == "mysql":
+        # 对于MySQL, VARCHAR在information_schema中有一个长度，而TEXT类型没有。
+        check_sql = text(f"SELECT DATA_TYPE FROM information_schema.columns WHERE table_schema = '{db_name}' AND table_name = 'episode' AND column_name = 'source_url'")
+        alter_sql = text("ALTER TABLE episode MODIFY COLUMN `source_url` TEXT")
+    elif db_type == "postgresql":
+        check_sql = text("SELECT data_type FROM information_schema.columns WHERE table_name = 'episode' AND column_name = 'source_url'")
+        alter_sql = text('ALTER TABLE episode ALTER COLUMN "source_url" TYPE TEXT')
+    else:
+        return
+
+    result = await conn.execute(check_sql)
+    current_type = result.scalar_one_or_none()
+    
+    # 如果列存在且其类型不是某种形式的TEXT，则进行修改。
+    if current_type and 'text' not in current_type.lower():
+        logger.info(f"列 'episode.source_url' 当前类型为 {current_type}，正在修改为 TEXT...")
+        await conn.execute(alter_sql)
+        logger.info(f"成功将列 'episode.source_url' 修改为 TEXT。")
+    else:
+        logger.info(f"列 'episode.source_url' 无需修改。")
+    logger.info(f"迁移任务 '{migration_id}' 检查完成。")
+
 async def _run_migrations(conn):
     """
     执行所有一次性的数据库架构迁移。
@@ -109,6 +162,25 @@ async def _run_migrations(conn):
     await _migrate_add_anime_year(conn, db_type, db_name)
     await _migrate_add_scheduled_task_id(conn, db_type, db_name)
     await _migrate_add_failover_enabled_to_metadata_sources(conn, db_type, db_name)
+    await _migrate_alter_danmaku_file_path_length(conn, db_type, db_name)
+    await _migrate_alter_source_url_to_text(conn, db_type, db_name)
+
+def _log_db_connection_error(context_message: str, e: Exception):
+    """Logs a standardized, detailed error message for database connection failures."""
+    logger.error("="*60)
+    logger.error(f"=== {context_message}失败，应用无法启动。 ===")
+    logger.error(f"=== 错误类型: {type(e).__name__}")
+    logger.error(f"=== 错误详情: {e}")
+    logger.error("---")
+    logger.error("--- 可能的原因与排查建议: ---")
+    logger.error("--- 1. 数据库服务未运行: 请确认您的数据库服务正在运行。")
+    logger.error(f"--- 2. 配置错误: 请检查您的配置文件或环境变量中的数据库连接信息是否正确。")
+    logger.error(f"---    - 主机 (Host): {settings.database.host}")
+    logger.error(f"---    - 端口 (Port): {settings.database.port}")
+    logger.error(f"---    - 用户 (User): {settings.database.user}")
+    logger.error("--- 3. 网络问题: 如果应用和数据库在不同的容器或机器上，请检查它们之间的网络连接和防火墙设置。")
+    logger.error("--- 4. 权限问题: 确认提供的用户有权限从应用所在的IP地址连接，并有创建数据库的权限。")
+    logger.error("="*60)
 
 async def create_db_engine_and_session(app: FastAPI):
     """创建数据库引擎和会话工厂，并存储在 app.state 中"""
@@ -147,20 +219,8 @@ async def create_db_engine_and_session(app: FastAPI):
         app.state.db_session_factory = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
         logger.info("数据库引擎和会话工厂创建成功。")
     except Exception as e:
-        logger.error("="*60)
-        logger.error("=== 无法连接到数据库服务器，应用无法启动。 ===")
-        logger.error(f"=== 错误类型: {type(e).__name__}")
-        logger.error(f"=== 错误详情: {e}")
-        logger.error("---")
-        logger.error("--- 可能的原因与排查建议: ---")
-        logger.error("--- 1. 数据库服务未运行: 请确认您的 数据库 服务正在运行。")
-        logger.error(f"--- 2. 配置错误: 请检查您的配置文件或环境变量中的数据库连接信息是否正确。")
-        logger.error(f"---    - 主机 (Host): {settings.database.host}")
-        logger.error(f"---    - 端口 (Port): {settings.database.port}")
-        logger.error(f"---    - 用户 (User): {settings.database.user}")
-        logger.error("--- 3. 网络问题: 如果应用和数据库在不同的容器或机器上，请检查它们之间的网络连接和防火墙设置。")
-        logger.error("--- 4. 权限问题: 确认提供的用户有权限从应用所在的IP地址连接，并有创建数据库的权限。")
-        logger.error("="*60)
+        # 修正：调用标准化的错误日志函数，并提供更精确的上下文
+        _log_db_connection_error(f"连接目标数据库 '{settings.database.name}'", e)
         raise
 
 async def _create_db_if_not_exists():
@@ -210,22 +270,8 @@ async def _create_db_if_not_exists():
             else:
                 logger.info(f"数据库 '{db_name}' 已存在，跳过创建。")
     except Exception as e:
-        logger.error(f"检查或创建数据库时发生错误: {e}", exc_info=True)
-        # Provide detailed error message like the old code
-        logger.error("="*60)
-        logger.error("=== 无法连接到数据库服务器，应用无法启动。 ===")
-        logger.error(f"=== 错误类型: {type(e).__name__}")
-        logger.error(f"=== 错误详情: {e}")
-        logger.error("---")
-        logger.error("--- 可能的原因与排查建议: ---")
-        logger.error("--- 1. 数据库服务未运行: 请确认您的 数据库 服务正在运行。")
-        logger.error(f"--- 2. 配置错误: 请检查您的配置文件或环境变量中的数据库连接信息是否正确。")
-        logger.error(f"---    - 主机 (Host): {settings.database.host}")
-        logger.error(f"---    - 端口 (Port): {settings.database.port}")
-        logger.error(f"---    - 用户 (User): {settings.database.user}")
-        logger.error("--- 3. 网络问题: 如果应用和数据库在不同的容器或机器上，请检查它们之间的网络连接和防火墙设置。")
-        logger.error("--- 4. 权限问题: 确认提供的用户有权限从应用所在的IP地址连接，并有创建数据库的权限。")
-        logger.error("="*60)
+        # 修正：调用标准化的错误日志函数，并提供更精确的上下文
+        _log_db_connection_error("检查或创建数据库时连接服务器", e)
         raise
     finally:
         await engine.dispose()

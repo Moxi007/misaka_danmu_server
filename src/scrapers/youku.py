@@ -95,7 +95,7 @@ class YoukuScraper(BaseScraper):
     provider_name = "youku"
     handled_domains = ["v.youku.com"]
     referer = "https://v.youku.com"
-    _EPISODE_BLACKLIST_KEYWORDS = ["彩蛋", "加更", "走心", "解忧", "纯享"]
+    _PROVIDER_SPECIFIC_BLACKLIST_DEFAULT = r"^(.*?)(抢先(版|篇)?|加更(版|篇)?|花絮|预告|特辑|彩蛋|专访|幕后(故事|花絮)?|直播|纯享|未播|衍生|番外|会员(专属|加长)?|片花|精华|看点|速览|解读|reaction|影评)(.*?)$"
 
     def __init__(self, session_factory: async_sessionmaker[AsyncSession], config_manager: ConfigManager):
         super().__init__(session_factory, config_manager)
@@ -245,68 +245,68 @@ class YoukuScraper(BaseScraper):
         # 优酷的逻辑不区分电影和电视剧，都是从一个show_id获取列表，
         # 所以db_media_type在这里用不上，但为了接口统一还是保留参数。
         # 仅当请求完整列表时才使用缓存
-        cache_key = f"episodes_{media_id}"
+        # 修正：缓存键应表示缓存的是原始数据
+        cache_key = f"episodes_raw_{media_id}"
+        
+        raw_episodes: List[YoukuEpisodeInfo] = []
+
+        # 仅当请求完整列表时才尝试从缓存获取
         if target_episode_index is None:
             cached_episodes = await self._get_from_cache(cache_key)
             if cached_episodes is not None:
-                self.logger.info(f"Youku: 从缓存中命中分集列表 (media_id={media_id})")
-                return [models.ProviderEpisodeInfo.model_validate(e) for e in cached_episodes]
+                self.logger.info(f"Youku: 从缓存中命中原始分集列表 (media_id={media_id})")
+                raw_episodes = [YoukuEpisodeInfo.model_validate(e) for e in cached_episodes]
 
-        all_episodes = []
-        page = 1
-        page_size = 20
-        total_episodes = 0
+        # 如果缓存未命中或不需要缓存，则从网络获取
+        if not raw_episodes:
+            self.logger.info(f"Youku: 缓存未命中或需要特定分集，正在为 media_id={media_id} 执行网络获取...")
+            network_episodes = []
+            page = 1
+            page_size = 20
+            
+            while True:
+                try:
+                    page_result = await self._get_episodes_page(media_id, page, page_size)
+                    if not page_result or not page_result.videos:
+                        break
+                    
+                    network_episodes.extend(page_result.videos)
 
-        while True:
-            try:
-                page_result = await self._get_episodes_page(media_id, page, page_size)
-                if not page_result or not page_result.videos:
+                    # 修正：使用 page_result.total 来判断是否已获取所有分集
+                    if len(network_episodes) >= page_result.total or len(page_result.videos) < page_size:
+                        break
+                    
+                    page += 1
+                    await asyncio.sleep(0.3)
+                except Exception as e:
+                    self.logger.error(f"Youku: 获取分集页面 {page} 失败 (media_id={media_id}): {e}", exc_info=True)
                     break
-                
-                if page == 1 and page_result.total:
-                    total_episodes = page_result.total
+            
+            raw_episodes = network_episodes
+            # 仅当请求完整列表且成功获取到数据时，才缓存原始数据
+            if raw_episodes and target_episode_index is None:
+                await self._set_to_cache(cache_key, [e.model_dump() for e in raw_episodes], 'episodes_ttl_seconds', 1800)
 
-                filtered_videos = []
-                for v in page_result.videos:
-                    if not any(kw in v.title for kw in self._EPISODE_BLACKLIST_KEYWORDS):
-                        filtered_videos.append(v)
-                all_episodes.extend(filtered_videos)
+        # --- 关键修正：总是在获取数据后（无论来自缓存还是网络）应用过滤 ---
+        blacklist_pattern = await self.get_episode_blacklist_pattern()
+        if blacklist_pattern:
+            original_count = len(raw_episodes)
+            filtered_episodes = [ep for ep in raw_episodes if not blacklist_pattern.search(ep.title)]
+            if original_count > len(filtered_episodes):
+                self.logger.info(f"Youku: 根据黑名单规则过滤掉了 {original_count - len(filtered_episodes)} 个分集。")
+        else:
+            filtered_episodes = raw_episodes
 
-                if len(all_episodes) >= total_episodes or len(page_result.videos) < page_size:
-                    break
-                
-                if target_episode_index and len(all_episodes) >= target_episode_index:
-                    self.logger.info(f"Youku: Found target episode index {target_episode_index}, stopping pagination.")
-                    break
-
-                page += 1
-                await asyncio.sleep(0.3)
-            except Exception as e:
-                self.logger.error(f"Youku: Failed to get episodes page {page} for media_id {media_id}: {e}", exc_info=True)
-                break
-        
+        # 在过滤后的列表上重新编号
         provider_episodes = [
             models.ProviderEpisodeInfo(
                 provider=self.provider_name,
                 episodeId=ep.id.replace("=", "_"),
                 title=ep.title,
-                episodeIndex=i + 1,
+                episodeIndex=i + 1, # 关键：使用过滤后列表的连续索引
                 url=ep.link
-            ) for i, ep in enumerate(all_episodes)
+            ) for i, ep in enumerate(filtered_episodes)
         ]
-
-        # Apply custom blacklist from config
-        blacklist_pattern = await self.get_episode_blacklist_pattern()
-        if blacklist_pattern:
-            original_count = len(provider_episodes)
-            provider_episodes = [ep for ep in provider_episodes if not blacklist_pattern.search(ep.title)]
-            filtered_count = original_count - len(provider_episodes)
-            if filtered_count > 0:
-                self.logger.info(f"Youku: 根据自定义黑名单规则过滤掉了 {filtered_count} 个分集。")
-
-        if target_episode_index is None:
-            episodes_to_cache = [e.model_dump() for e in provider_episodes]
-            await self._set_to_cache(cache_key, episodes_to_cache, 'episodes_ttl_seconds', 1800)
 
         if target_episode_index:
             target = next((ep for ep in provider_episodes if ep.episodeIndex == target_episode_index), None)

@@ -54,30 +54,14 @@ class Episode(Base):
     title: Mapped[str] = mapped_column(String(255))
     episodeIndex: Mapped[int] = mapped_column("episode_index", Integer)
     providerEpisodeId: Mapped[Optional[str]] = mapped_column("provider_episode_id", String(255))
-    sourceUrl: Mapped[Optional[str]] = mapped_column("source_url", String(512)) # type: ignore
+    sourceUrl: Mapped[Optional[str]] = mapped_column("source_url", TEXT) # type: ignore
+    danmakuFilePath: Mapped[Optional[str]] = mapped_column("danmaku_file_path", String(512)) # 新增：存储弹幕文件的相对路径
     fetchedAt: Mapped[Optional[datetime]] = mapped_column("fetched_at", TIMESTAMP(timezone=True))
     commentCount: Mapped[int] = mapped_column("comment_count", Integer, default=0)
 
     source: Mapped["AnimeSource"] = relationship(back_populates="episodes")
-    comments: Mapped[List["Comment"]] = relationship(back_populates="episode", cascade="all, delete-orphan")
 
     __table_args__ = (UniqueConstraint('source_id', 'episode_index', name='idx_source_episode_unique'),)
-
-class Comment(Base):
-    __tablename__ = "comment"
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    cid: Mapped[str] = mapped_column(String(255))
-    episodeId: Mapped[int] = mapped_column("episode_id", ForeignKey("episode.id", ondelete="CASCADE"))
-    p: Mapped[str] = mapped_column(String(255))
-    m: Mapped[str] = mapped_column(TEXT)
-    t: Mapped[float] = mapped_column(DECIMAL(10, 2))
-
-    episode: Mapped["Episode"] = relationship(back_populates="comments")
-
-    __table_args__ = (
-        UniqueConstraint('episode_id', 'cid', name='idx_episode_cid_unique'),
-        Index('idx_episode_time', 'episode_id', 't'),
-    )
 
 class User(Base):
     __tablename__ = "users"

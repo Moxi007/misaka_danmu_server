@@ -3,3 +3,5 @@ venv/*
 
 src/**/__pycache__/
 src/**/.DS_Store
+config/danmaku
+config/image
