@@ -805,10 +805,11 @@ async def favorite_source(sourceId: int, session: AsyncSession = Depends(get_db_
     message = "数据源已标记为精确。" if new_status else "数据源已取消精确标记。"
     return {"message": message}
 
-@router.get("/library/source/{sourceid}/episodes", response_model=List[models.EpisodeDetail], summary="获取源的分集列表")
-async def get_source_episodes(sourceid: int, session: AsyncSession = Depends(get_db_session)):
+@router.get("/library/source/{sourceId}/episodes", response_model=List[models.EpisodeDetail], summary="获取源的分集列表")
+async def get_source_episodes(sourceId: int, session: AsyncSession = Depends(get_db_session)):
     """获取指定数据源下所有已收录的分集列表。"""
-    return await crud.get_episodes_for_source(session, sourceid)
+    paginated_result = await crud.get_episodes_for_source(session, sourceId)
+    return paginated_result.get("episodes", [])
 
 @router.put("/library/episode/{episodeid}", response_model=ControlActionResponse, summary="编辑分集信息")
 async def edit_episode(episodeid: int, payload: models.EpisodeInfoUpdate, session: AsyncSession = Depends(get_db_session)):

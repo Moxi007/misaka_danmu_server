@@ -707,8 +707,9 @@ async def refresh_anime(
     
     if mode == "incremental":
         logger.info(f"用户 '{current_user.username}' 为番剧 '{source_info['title']}' (源ID: {sourceId}) 启动了增量刷新任务。")
-        eps = await crud.get_episodes_for_source(session, sourceId)
-        latest_episode_index = max((ep['episodeIndex'] for ep in eps), default=0)
+        # 修正：crud.get_episodes_for_source 现在返回一个带分页的字典
+        paginated_result = await crud.get_episodes_for_source(session, sourceId, page_size=9999) # 获取所有分集以找到最大集数
+        latest_episode_index = max((ep['episodeIndex'] for ep in paginated_result.get("episodes", [])), default=0)
         next_episode_index = latest_episode_index + 1
         
         task_title = f"增量刷新: {source_info['title']} ({source_info['providerName']}) - 尝试第{next_episode_index}集"

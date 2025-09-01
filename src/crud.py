@@ -892,11 +892,16 @@ async def get_episodes_for_source(session: AsyncSession, source_id: int, page: i
     total_count = (await session.execute(count_stmt)).scalar_one()
 
     # 然后，根据分页参数查询特定页的数据
+    # 修正：确保返回一个包含完整信息的字典列表，以修复UI中的TypeError
     offset = (page - 1) * page_size
     stmt = (
         select(
-            Episode.id.label("episodeId"), Episode.title, Episode.episodeIndex.label("episodeIndex"),
-            Episode.sourceUrl.label("sourceUrl"), Episode.fetchedAt.label("fetchedAt"), Episode.commentCount.label("commentCount")
+            Episode.id.label("episodeId"),
+            Episode.title,
+            Episode.episodeIndex.label("episodeIndex"),
+            Episode.sourceUrl.label("sourceUrl"),
+            Episode.fetchedAt.label("fetchedAt"),
+            Episode.commentCount.label("commentCount")
         )
         .where(Episode.sourceId == source_id)
         .order_by(Episode.episodeIndex).offset(offset).limit(page_size)
@@ -922,14 +927,19 @@ async def get_episode_provider_info(session: AsyncSession, episode_id: int) -> O
 
 async def clear_source_data(session: AsyncSession, source_id: int):
     """Deletes all episodes and their danmaku files for a given source."""
-    import shutil
     source = await session.get(AnimeSource, source_id)
     if not source:
         return
     
-    source_danmaku_dir = DANMAKU_BASE_DIR / str(source.animeId) / str(source_id)
-    if source_danmaku_dir.exists() and source_danmaku_dir.is_dir():
-        shutil.rmtree(source_danmaku_dir)
+    # 修正：逐个删除文件，而不是删除一个不存在的目录，以提高健壮性
+    episodes_to_delete_res = await session.execute(
+        select(Episode.danmakuFilePath).where(Episode.sourceId == source_id)
+    )
+    for file_path_str in episodes_to_delete_res.scalars().all():
+        if fs_path := _get_fs_path_from_web_path(file_path_str):
+            if fs_path.is_file():
+                fs_path.unlink(missing_ok=True)
+
     await session.execute(delete(Episode).where(Episode.sourceId == source_id))
     await session.commit()
 
@@ -1262,20 +1272,6 @@ async def get_enabled_failover_sources(session: AsyncSession) -> List[Dict[str, 
         {"providerName": s.providerName, "isEnabled": s.isEnabled, "isAuxSearchEnabled": s.isAuxSearchEnabled, "displayOrder": s.displayOrder, "useProxy": s.useProxy, "isFailoverEnabled": s.isFailoverEnabled}
         for s in result.scalars()
     ]
-
-async def get_enabled_failover_sources(session: AsyncSession) -> List[Dict[str, Any]]:
-    """获取所有已启用故障转移的元数据源。"""
-    stmt = (
-        select(MetadataSource)
-        .where(MetadataSource.isFailoverEnabled == True)
-        .order_by(MetadataSource.displayOrder)
-    )
-    result = await session.execute(stmt)
-    return [
-        {"providerName": s.providerName, "isEnabled": s.isEnabled, "isAuxSearchEnabled": s.isAuxSearchEnabled, "displayOrder": s.displayOrder, "useProxy": s.useProxy, "isFailoverEnabled": s.isFailoverEnabled}
-        for s in result.scalars()
-    ]
-
 # --- Config & Cache ---
 
 async def get_config_value(session: AsyncSession, key: str, default: str) -> str:

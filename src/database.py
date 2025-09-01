@@ -41,11 +41,13 @@ async def _migrate_add_source_order(conn, db_type, db_name):
         distinct_anime_ids = distinct_anime_ids_res.scalars().all()
 
         for anime_id in distinct_anime_ids:
-            sources_res = await conn.execute(text(f"SELECT id FROM anime_sources WHERE anime_id = {anime_id} ORDER BY id"))
+            select_stmt = text("SELECT id FROM anime_sources WHERE anime_id = :anime_id ORDER BY id")
+            sources_res = await conn.execute(select_stmt, {"anime_id": anime_id})
             sources_ids = sources_res.scalars().all()
             for i, source_id in enumerate(sources_ids):
                 order = i + 1
-                await conn.execute(text(f"UPDATE anime_sources SET source_order = {order} WHERE id = {source_id}"))
+                update_stmt = text("UPDATE anime_sources SET source_order = :order WHERE id = :source_id")
+                await conn.execute(update_stmt, {"order": order, "source_id": source_id})
         logger.info("成功填充 'source_order' 数据。")
 
         # --- 3. 将列修改为 NOT NULL ---

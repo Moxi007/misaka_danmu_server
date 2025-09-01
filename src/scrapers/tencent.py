@@ -180,7 +180,7 @@ class TencentScraper(BaseScraper):
         "前季回顾", "剧情回顾", "往期回顾", "内容总结", "剧情盘点", "精选合集", "剪辑合集", "混剪视频",
         "独家专访", "演员访谈", "导演访谈", "主创访谈", "媒体采访", "发布会采访",
         "抢先看", "抢先版", "试看版", "短剧", "vlog", "纯享", "加更", "reaction",
-        "精编", "会员版", "Plus", "独家版", "特别版"
+        "精编", "会员版", "Plus", "独家版", "特别版", "短片", "合唱"
     ])
 
     def __init__(self, session_factory: async_sessionmaker[AsyncSession], config_manager: ConfigManager):
@@ -845,8 +845,21 @@ class TencentScraper(BaseScraper):
             blacklist_pattern = await self.get_episode_blacklist_pattern()
             if blacklist_pattern:
                 original_count = len(episodes_to_format)
-                episodes_to_format = [ep for ep in episodes_to_format if not blacklist_pattern.search(ep.union_title or ep.title or "")]
-                self.logger.info(f"Tencent: 根据黑名单规则过滤掉了 {original_count - len(episodes_to_format)} 个分集。")
+            
+            temp_episodes = []
+            for ep in episodes_to_format:
+                title_to_check = ep.union_title or ep.title or ""
+                
+                # 启发式规则，用于识别正片（例如，标题是纯数字 "1"，或包含 "第1集"）
+                is_likely_main_episode = bool(re.fullmatch(r'\d+', title_to_check.strip())) or '第' in title_to_check
+                
+                # 如果是正片，则无论如何都保留。
+                # 如果不是正片，则检查是否匹配黑名单。
+                if is_likely_main_episode or not blacklist_pattern.search(title_to_check):
+                    temp_episodes.append(ep)
+            
+            self.logger.info(f"Tencent: 根据黑名单规则过滤掉了 {original_count - len(temp_episodes)} 个分集。")
+            episodes_to_format = temp_episodes
 
         # 5. 最终格式化 (后编号)
         final_episodes = []
@@ -1066,20 +1079,17 @@ class TencentScraper(BaseScraper):
 
     async def get_id_from_url(self, url: str) -> Optional[str]:
         """从腾讯视频URL中提取 media_id (cid 或 vid)，以实现基类的抽象方法。"""
-        # 优先匹配 cover URL 中的 cid
-        cid_match = re.search(r'/cover/([^/]+?)(/|\.html|$)', url)
-        if cid_match:
-            cid = cid_match.group(1)
-            self.logger.info(f"Tencent: 从URL {url} 解析到 cid: {cid}")
-            return cid
-
-        # 如果不是 cover URL，再尝试匹配普通视频页的 vid
-        vid_match = re.search(r'/([a-zA-Z0-9]+)\.html', url)
-        if vid_match:
-            vid = vid_match.group(1)
-            self.logger.info(f"Tencent: 从URL {url} 解析到 vid: {vid}")
-            return vid
-        self.logger.warning(f"Tencent: 无法从URL中解析出 cid 或 vid: {url}")
+        # 使用一个正则表达式同时匹配 cover URL 的 cid 和普通视频页的 vid
+        # 模式1: /cover/cid/...  模式2: /vid.html
+        match = re.search(r'/cover/([^/]+?)(?:/|\.html|$)|/([a-zA-Z0-9]{11,})\.html', url)
+        if match:
+            # match.group(1) 对应 cid, match.group(2) 对应 vid
+            media_id = match.group(1) or match.group(2)
+            id_type = "cid" if match.group(1) else "vid"
+            self.logger.info(f"Tencent: 从URL {url} 解析到 {id_type}: {media_id}")
+            return media_id
+        
+        self.logger.warning(f"Tencent: 无法从URL中解析出有效的 media_id: {url}")
         return None
 
     def format_episode_id_for_comments(self, provider_episode_id: Any) -> str:
