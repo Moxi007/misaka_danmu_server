@@ -518,6 +518,42 @@ class TencentScraper(BaseScraper):
             self.logger.error(f"Tencent: 从URL '{url}' 提取信息失败: {e}", exc_info=True)
             return None
 
+    async def _get_movie_vid_from_api(self, cid: str) -> Optional[str]:
+        """对于电影，优先尝试使用API获取其vid，这比解析HTML更可靠。"""
+        self.logger.info(f"正在尝试使用API获取电影 (cid={cid}) 的 vid...")
+        payload = {
+            "page_params": {
+                "cid": cid,
+                "page_type": "detail_operation",
+                "page_id": "vsite_episode_list_search",
+                "id_type": "1",
+                "page_size": "10",  # 我们只需要一个，但请求几个以防万一
+                "lid": "",
+                "req_from": "web_vsite",
+                "page_context": f"cid={cid}&req_from=web_vsite",
+                "page_num": "0"
+            }
+        }
+        try:
+            response = await self.client.post(self.episodes_api_url, json=payload)
+            response.raise_for_status()
+            result = TencentPageResult.model_validate(response.json())
+
+            if result.data and result.data.module_list_datas:
+                for module_list_data in result.data.module_list_datas:
+                    for module_data in module_list_data.module_datas:
+                        if module_data.item_data_lists:
+                            for item in module_data.item_data_lists.item_datas:
+                                # 找到第一个不是预告片的有效vid
+                                if item.item_params and item.item_params.vid and item.item_params.is_trailer != "1":
+                                    vid = item.item_params.vid
+                                    self.logger.info(f"通过API成功获取到电影 (cid={cid}) 的 vid: {vid}")
+                                    return vid
+        except Exception as e:
+            self.logger.error(f"通过API获取电影vid失败 (cid={cid}): {e}", exc_info=False)
+        
+        self.logger.warning(f"通过API未能获取到电影 (cid={cid}) 的 vid。")
+        return None
     async def get_episodes(self, media_id: str, target_episode_index: Optional[int] = None, db_media_type: Optional[str] = None) -> List[models.ProviderEpisodeInfo]:
         """
         获取分集列表，优先使用新的“分页卡片”策略。
@@ -526,47 +562,57 @@ class TencentScraper(BaseScraper):
         # 电影通常只有一个分集（即正片本身），其 episodeId 需要是 vid，而传入的 media_id 是 cid。
         if db_media_type == 'movie':
             self.logger.info(f"检测到媒体类型为电影 (media_id={media_id})，将获取正片 vid。")
-            try:
-                # 对于电影，我们需要从其主页获取真实的 vid
-                cover_url = f"https://v.qq.com/x/cover/{media_id}.html"
-                response = await self.client.get(cover_url)
-                response.raise_for_status()
-                html_content = response.text
+            
+            # 优先尝试通过API获取，更稳定
+            final_episode_id = await self._get_movie_vid_from_api(media_id)
 
-                vid = None
-                # 优先尝试从 window.__INITIAL_DATA__ 解析，更稳定
-                match = re.search(r'window\.__INITIAL_DATA__\s*=\s*({.*?});', html_content)
-                if match:
-                    try:
-                        initial_data = json.loads(match.group(1))
-                        vid = initial_data.get("video_info", {}).get("vid")
-                    except (json.JSONDecodeError, KeyError, TypeError):
-                        self.logger.warning("解析 __INITIAL_DATA__ 失败，将尝试备用方法。")
+            if not final_episode_id:
+                # 如果API失败，回退到HTML解析
+                self.logger.warning(f"API获取电影vid失败，回退到HTML页面解析 (cid={media_id})。")
+                try:
+                    cover_url = f"https://v.qq.com/x/cover/{media_id}.html"
+                    response = await self.client.get(cover_url)
+                    response.raise_for_status()
+                    html_content = response.text
 
-                # 如果第一种方法失败，使用备用正则
-                if not vid:
-                    match = re.search(r'"vid"\s*:\s*"([a-zA-Z0-9]+)"', html_content)
-                    if match:
-                        vid = match.group(1)
+                    vid = None
+                    # 1. 最优先尝试从 COVER_INFO 变量解析
+                    cover_info_match = re.search(r'var\s+COVER_INFO\s*=\s*({.*?});', html_content)
+                    if cover_info_match:
+                        try:
+                            cover_info_data = json.loads(cover_info_match.group(1))
+                            vid = cover_info_data.get("vid")
+                            if vid: self.logger.info("从 COVER_INFO 成功解析到电影的 vid。")
+                        except (json.JSONDecodeError, KeyError, TypeError):
+                            self.logger.warning("解析 COVER_INFO 失败，将尝试备用方法。")
 
-                if vid:
-                    self.logger.info(f"从页面成功解析到电影的 vid: {vid}")
-                    final_episode_id = vid
-                else:
-                    self.logger.warning(f"无法从页面解析电影的 vid，将回退使用 cid ({media_id}) 作为 vid。这可能导致弹幕获取失败。")
-                    final_episode_id = media_id
+                    # 2. 备用方法：尝试从 __INITIAL_DATA__ 解析
+                    if not vid:
+                        initial_data_match = re.search(r'window\.__INITIAL_DATA__\s*=\s*({.*?});', html_content)
+                        if initial_data_match:
+                            try:
+                                initial_data = json.loads(initial_data_match.group(1))
+                                vid = initial_data.get("video_info", {}).get("vid")
+                                if vid: self.logger.info("从 __INITIAL_DATA__ 成功解析到电影的 vid。")
+                            except (json.JSONDecodeError, KeyError, TypeError):
+                                self.logger.warning("解析 __INITIAL_DATA__ 失败，将尝试备用方法。")
+                    
+                    if vid:
+                        self.logger.info(f"从页面成功解析到电影的 vid: {vid}")
+                        final_episode_id = vid
 
-                return [models.ProviderEpisodeInfo(
-                    provider=self.provider_name, episodeId=final_episode_id, title="正片", episodeIndex=1,
-                    url=f"https://v.qq.com/x/cover/{media_id}/{final_episode_id}.html"
-                )]
-            except Exception as e:
-                self.logger.error(f"获取电影 vid 时出错 (cid={media_id})，将回退使用 cid: {e}", exc_info=True)
-                # 发生异常时也回退
-                return [models.ProviderEpisodeInfo(
-                    provider=self.provider_name, episodeId=media_id, title="正片", episodeIndex=1,
-                    url=f"https://v.qq.com/x/cover/{media_id}.html"
-                )]
+                except Exception as e:
+                    self.logger.error(f"HTML解析电影 vid 时出错 (cid={media_id})，将回退使用 cid: {e}", exc_info=True)
+            
+            # 如果所有方法都失败，则回退使用cid
+            if not final_episode_id:
+                self.logger.warning(f"所有方法均无法解析电影的 vid，将回退使用 cid ({media_id}) 作为 vid。这可能导致弹幕获取失败。")
+                final_episode_id = media_id
+
+            return [models.ProviderEpisodeInfo(
+                provider=self.provider_name, episodeId=final_episode_id, title="正片", episodeIndex=1,
+                url=f"https://v.qq.com/x/cover/{media_id}/{final_episode_id}.html"
+            )]
 
         episodes = []
         try:
@@ -1012,8 +1058,8 @@ class TencentScraper(BaseScraper):
             
             # 将字符串类型的 time_offset 转为浮点数秒
             timestamp = int(c.time_offset) / 1000.0
-            # 格式: 时间,模式,颜色,[来源]
-            p_string = f"{timestamp:.2f},{mode},{color},[{self.provider_name}]"
+            # 格式: 时间,模式,字体大小,颜色,[来源]
+            p_string = f"{timestamp:.2f},{mode},25,{color},[{self.provider_name}]"
             formatted_comments.append({"cid": c.id, "p": p_string, "m": c.content, "t": round(timestamp, 2)})
 
         return formatted_comments

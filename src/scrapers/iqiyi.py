@@ -50,10 +50,15 @@ class IqiyiSearchAlbumInfo(BaseModel):
 
     @property
     def link_id(self) -> Optional[str]:
-        link_to_parse = self.album_link
-        if self.videoinfos and self.videoinfos[0].item_link and self.album_link:
+        # 优先使用分集链接，然后是专辑链接
+        link_to_parse = None
+        if self.videoinfos and self.videoinfos[0].item_link:
             link_to_parse = self.videoinfos[0].item_link
+        elif self.album_link:
+            link_to_parse = self.album_link
 
+        if not link_to_parse:
+            return None
         match = re.search(r"v_(\w+?)\.html", link_to_parse)
         return match.group(1).strip() if match else None
 
@@ -129,11 +134,20 @@ class IqiyiV3EpisodeItem(BaseModel):
     order: int
     play_url: str = Field(alias="play_url")
 
-class IqiyiV3AlbumData(BaseModel):
-    video_list: List[IqiyiV3EpisodeItem] = Field(default_factory=list, alias="video_list")
+class IqiyiV3BaseData(BaseModel):
+    model_config = ConfigDict(extra='ignore') # 忽略API返回的未知字段
+    qipu_id: Optional[int] = None
+    current_video_tvid: Optional[int] = None
+    title: Optional[str] = None
+    # video_list is not here, it's in the template
+    channel_id: Optional[int] = None
+    current_video_year: Optional[int] = None
+    image_url: Optional[str] = None
+    play_url: Optional[str] = None
 
 class IqiyiV3ResponseData(BaseModel):
-    base_data: IqiyiV3AlbumData = Field(alias="base_data")
+    base_data: IqiyiV3BaseData
+    template: Optional[Dict[str, Any]] = None # Parse template as a raw dict
 
 class IqiyiV3ApiResponse(BaseModel):
     status_code: int
@@ -262,6 +276,37 @@ class IqiyiScraper(BaseScraper):
             list(range(0xE000, 0xFDCF + 1)) +
             list(range(0xFDE0, 0xFFFD + 1))
          )
+
+    async def get_episode_blacklist_pattern(self) -> Optional[re.Pattern]:
+        """
+        获取并编译用于过滤分集的正则表达式。
+        此方法覆盖了基类中的方法，以确保对该源的正确回退逻辑。
+        """
+        # 1. 构造该源特定的配置键，确保与数据库键名一致
+        provider_blacklist_key = f"{self.provider_name}_episode_blacklist_regex"
+        
+        # 2. 从数据库动态获取用户自定义规则
+        custom_blacklist_str = await self.config_manager.get(provider_blacklist_key)
+
+        final_blacklist_str = None
+        # 3. 优先使用用户自定义的、非空的规则
+        if custom_blacklist_str and custom_blacklist_str.strip():
+            self.logger.info(f"正在为 '{self.provider_name}' 使用数据库中的自定义分集黑名单。")
+            final_blacklist_str = custom_blacklist_str
+        # 4. 如果没有自定义规则，则回退到代码中内置的默认规则
+        elif self._PROVIDER_SPECIFIC_BLACKLIST_DEFAULT:
+            self.logger.info(f"正在为 '{self.provider_name}' 使用代码中内置的默认分集黑名单。")
+            final_blacklist_str = self._PROVIDER_SPECIFIC_BLACKLIST_DEFAULT
+        
+        if final_blacklist_str:
+            try:
+                # 5. 编译正则表达式并返回
+                return re.compile(final_blacklist_str, re.IGNORECASE)
+            except re.error as e:
+                self.logger.error(f"编译 '{self.provider_name}' 的分集黑名单时出错: {e}。规则: '{final_blacklist_str}'")
+        
+        # 6. 如果没有任何规则，返回 None
+        return None
 
     async def close(self):
         """关闭HTTP客户端"""
@@ -399,7 +444,7 @@ class IqiyiScraper(BaseScraper):
         }
         headers = {
             'accept': '*/*', 'origin': 'https://www.iqiyi.com', 'referer': 'https://www.iqiyi.com/',
-            'user-agent': 'Mozilla/5.0 (Linux; Android 13; SM-G981B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Mobile Safari/537.36'
+            'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
         }
 
         results = []
@@ -602,10 +647,30 @@ class IqiyiScraper(BaseScraper):
         self.logger.info(f"爱奇艺: 正在从URL提取信息: {url}")
         link_id_match = re.search(r"v_(\w+?)\.html", url)
         if not link_id_match:
-            self.logger.warning(f"爱奇艺: 无法从URL中解析出link_id: {url}")
+            self.logger.warning(f"爱奇艺 (get_info): 无法从URL中解析出link_id: {url}")
             return None
         
         link_id = link_id_match.group(1)
+
+        # 方案1: 尝试新版 v3 API
+        v3_info = await self._get_v3_base_info(link_id)
+        if v3_info and v3_info.title:
+            self.logger.info(f"爱奇艺 (get_info): v3 API 成功获取信息。")
+            # channel_id mapping: 1-电影, 2-电视剧, 4-动漫
+            media_type = "movie" if v3_info.channel_id == 1 else "tv_series"
+            return models.ProviderSearchInfo(
+                provider=self.provider_name,
+                mediaId=link_id,
+                title=v3_info.title,
+                type=media_type,
+                season=get_season_from_title(v3_info.title),
+                year=v3_info.current_video_year,
+                imageUrl=v3_info.image_url
+            )
+
+        self.logger.warning(f"爱奇艺 (get_info): v3 API 获取信息失败，回退到旧版 API。")
+        
+        # 方案2: 回退到旧版 API
         base_info = await self._get_legacy_video_base_info(link_id)
         if not base_info:
             return None
@@ -620,13 +685,25 @@ class IqiyiScraper(BaseScraper):
             season=get_season_from_title(base_info.video_name)
         )
 
-    async def _get_episodes_v3(self, media_id: str) -> List[models.ProviderEpisodeInfo]:
-        """方案 #1: 使用新的 base_info API 获取分集列表。"""
-        self.logger.info(f"爱奇艺: 正在尝试使用新版API (v3) 获取分集 (media_id={media_id})")
+    async def _get_v3_full_response(self, media_id: str) -> Optional[IqiyiV3ApiResponse]:
+        """
+        方案 #0: 使用新的 base_info API 获取完整的视频基础信息，并进行缓存。
+        这是所有新版API数据获取的核心。
+        """
+        cache_key = f"v3_full_response_{media_id}"
+        cached_info = await self._get_from_cache(cache_key)
+        if cached_info:
+            self.logger.info(f"爱奇艺 (v3): 从缓存命中 full_response (media_id={media_id})")
+            try:
+                return IqiyiV3ApiResponse.model_validate(cached_info)
+            except ValidationError as e:
+                self.logger.warning(f"爱奇艺 (v3): 缓存的 full_response (media_id={media_id}) 验证失败: {e}")
+
+        self.logger.info(f"爱奇艺 (v3): 正在从网络获取 full_response (media_id={media_id})")
         entity_id = self._video_id_to_entity_id(media_id)
         if not entity_id:
             self.logger.warning(f"爱奇艺 (v3): 无法将 media_id '{media_id}' 转换为 entity_id。")
-            return []
+            return None
 
         params = {
             'entity_id': entity_id,
@@ -647,22 +724,93 @@ class IqiyiScraper(BaseScraper):
                 scraper_responses_logger.debug(f"iQiyi BaseInfo API Response (entity_id={entity_id}): {response.text}")
             response.raise_for_status()
 
-            result = IqiyiV3ApiResponse.model_validate(response.json())
-            if result.status_code != 0 or not result.data or not result.data.base_data.video_list:
-                self.logger.warning(f"爱奇艺 (v3): API未成功返回分集数据。状态码: {result.status_code}")
+            parsed_response = IqiyiV3ApiResponse.model_validate(response.json())
+            if parsed_response.status_code == 0:
+                await self._set_to_cache(cache_key, parsed_response.model_dump(), 'base_info_ttl_seconds', 1800)
+                self.logger.info(f"爱奇艺 (v3): 成功获取并缓存了 full_response (media_id={media_id})")
+                return parsed_response
+            else:
+                self.logger.warning(f"爱奇艺 (v3): API未成功返回数据。状态码: {parsed_response.status_code}")
+                return None
+        except Exception as e:
+            self.logger.error(f"爱奇艺 (v3): 获取 full_response 时发生错误: {e}", exc_info=True)
+            return None
+
+    async def _get_v3_base_info(self, media_id: str) -> Optional[IqiyiV3BaseData]:
+        """从完整的V3响应中提取并返回基础信息部分。"""
+        full_response = await self._get_v3_full_response(media_id)
+        if full_response and full_response.data:
+            return full_response.data.base_data
+        return None
+
+    async def _get_episodes_v3(self, media_id: str) -> List[models.ProviderEpisodeInfo]:
+        """方案 #1: 使用新的 base_info API 获取分集列表。"""
+        self.logger.info(f"爱奇艺: 正在尝试使用新版API (v3) 获取分集 (media_id={media_id})")
+        
+        v3_response = await self._get_v3_full_response(media_id)
+        if not v3_response or not v3_response.data or not v3_response.data.template:
+            self.logger.warning(f"爱奇艺 (v3): 未能获取到包含分集信息的 template 数据。")
+            return []
+
+        all_episodes = []
+        try:
+            tabs = v3_response.data.template.get("tabs", [])
+            if not tabs: return []
+
+            blocks = tabs[0].get("blocks", [])
+            episode_groups = []
+            for block in blocks:
+                if block.get("bk_type") == "album_episodes":
+                    if data := block.get("data", {}).get("data", []):
+                        episode_groups.extend(data)
+            
+            if not episode_groups:
+                self.logger.warning(f"爱奇艺 (v3): 在API响应中未找到 'album_episodes' 块。")
                 return []
 
-            episodes = [
-                models.ProviderEpisodeInfo(
-                    provider=self.provider_name, episodeId=str(ep.tv_id),
-                    title=ep.name, episodeIndex=ep.order, url=ep.play_url
-                ) for ep in result.data.base_data.video_list
-            ]
-            self.logger.info(f"爱奇艺 (v3): 成功获取 {len(episodes)} 个分集。")
-            return episodes
+            for group in episode_groups:
+                videos_data = group.get("videos")
+                if isinstance(videos_data, str):
+                    self.logger.info(f"爱奇艺 (v3): 发现分季URL，正在获取: {videos_data}")
+                    try:
+                        resp = await self._request("GET", videos_data)
+                        videos_data = resp.json()
+                    except Exception as e:
+                        self.logger.error(f"爱奇艺 (v3): 获取分季数据失败: {e}")
+                        continue
+                
+                if isinstance(videos_data, dict) and "feature_paged" in videos_data:
+                    for page_key, paged_list in videos_data["feature_paged"].items():
+                        for ep_data in paged_list:
+                            if ep_data.get("content_type") != 1: continue
+                            
+                            play_url = ep_data.get("play_url", "")
+                            tvid_match = re.search(r"tvid=(\d+)", play_url)
+                            if not tvid_match: continue
+                            
+                            tvid = tvid_match.group(1)
+                            title = ep_data.get("short_display_name") or ep_data.get("title", "未知分集")
+                            subtitle = ep_data.get("subtitle")
+                            if subtitle and subtitle not in title:
+                                title = f"{title} {subtitle}"
+                            
+                            order = ep_data.get("album_order")
+                            page_url = ep_data.get("page_url")
+
+                            if tvid and title and order and page_url:
+                                all_episodes.append(models.ProviderEpisodeInfo(
+                                    provider=self.provider_name, episodeId=tvid,
+                                    title=title, episodeIndex=order, url=page_url
+                                ))
         except Exception as e:
-            self.logger.error(f"爱奇艺 (v3): 获取分集时发生错误: {e}", exc_info=True)
+            self.logger.error(f"爱奇艺 (v3): 解析分集列表时发生错误: {e}", exc_info=True)
             return []
+
+        unique_episodes = list({ep.episodeId: ep for ep in all_episodes}.values())
+        unique_episodes.sort(key=lambda x: x.episodeIndex)
+
+        self.logger.info(f"爱奇艺 (v3): 成功获取 {len(unique_episodes)} 个分集。")
+        return unique_episodes
 
     async def _get_tvid_from_link_id(self, link_id: str) -> Optional[str]:
         """
@@ -766,30 +914,57 @@ class IqiyiScraper(BaseScraper):
             self.logger.error(f"爱奇艺: 备用方案 (解析HTML) 也失败了: {fallback_e}", exc_info=True)
             return None
 
-    async def _get_tv_episodes(self, album_id: int, size: int = 500) -> List[IqiyiEpisodeInfo]:
+    async def _get_tv_episodes(self, album_id: int, page_size: int = 200) -> List[IqiyiEpisodeInfo]:
         """
-        获取剧集列表，实现主/备API端点回退机制以提高成功率。
-        优先尝试国际版API，失败则回退到国内版API。
+        获取剧集列表，实现主/备API端点回退和分页机制。
         """
-        endpoints = [
-            f"https://pcw-api.iq.com/api/album/album/avlistinfo?aid={album_id}&page=1&size={size}",  # 国际版 (主)
-            f"https://pcw-api.iqiyi.com/albums/album/avlistinfo?aid={album_id}&page=1&size={size}"  # 国内版 (备)
+        # Base URLs for the endpoints
+        base_endpoints = [
+            "https://pcw-api.iq.com/api/album/album/avlistinfo",  # International (main)
+            "https://pcw-api.iqiyi.com/albums/album/avlistinfo"  # Mainland China (fallback)
         ]
 
-        for i, url in enumerate(endpoints):
+        for i, base_url in enumerate(base_endpoints):
+            all_episodes = []
+            page_num = 1
+            self.logger.info(f"爱奇艺: 正在尝试从端点 #{i+1} ({base_url}) 获取剧集列表 (album_id: {album_id})")
+            
             try:
-                self.logger.info(f"爱奇艺: 正在尝试从端点 #{i+1} 获取剧集列表 (album_id: {album_id})")
-                response = await self._request("GET", url)
-                if await self._should_log_responses():
-                    scraper_responses_logger.debug(f"iQiyi Album List Response (album_id={album_id}, endpoint=#{i+1}): {response.text}")
-                response.raise_for_status()
-                data = IqiyiVideoResult.model_validate(response.json())
+                while True:
+                    params = {
+                        "aid": album_id,
+                        "page": page_num,
+                        "size": page_size
+                    }
+                    url = f"{base_url}?{urlencode(params)}"
+                    
+                    self.logger.debug(f"爱奇艺: 正在获取第 {page_num} 页...")
+                    response = await self._request("GET", url)
+                    
+                    # 如果第一页就404，说明此端点可能不可用
+                    if response.status_code == 404 and page_num == 1:
+                        raise httpx.HTTPStatusError(f"端点在第一页返回404", request=response.request, response=response)
+                    
+                    response.raise_for_status()
+                    
+                    data = IqiyiVideoResult.model_validate(response.json())
+                    
+                    if data.data and data.data.epsodelist:
+                        episodes_on_page = data.data.epsodelist
+                        all_episodes.extend(episodes_on_page)
+                        self.logger.debug(f"爱奇艺: 第 {page_num} 页成功获取 {len(episodes_on_page)} 个分集。")
+                        
+                        # 如果返回的条目数小于请求的页面大小，说明是最后一页
+                        if len(episodes_on_page) < page_size:
+                            break
+                        page_num += 1
+                    else:
+                        # API未返回更多分集，结束循环
+                        break
                 
-                if data.data and data.data.epsodelist:
-                    self.logger.info(f"爱奇艺: 从端点 #{i+1} 成功获取 {len(data.data.epsodelist)} 个分集。")
-                    return data.data.epsodelist
-                
-                self.logger.warning(f"爱奇艺: 端点 #{i+1} 未返回分集数据。")
+                if all_episodes:
+                    self.logger.info(f"爱奇艺: 从端点 #{i+1} 成功获取 {len(all_episodes)} 个分集。")
+                    return all_episodes
             except Exception as e:
                 self.logger.error(f"爱奇艺: 尝试端点 #{i+1} 时发生错误 (album_id: {album_id}): {e}")
         
@@ -919,31 +1094,7 @@ class IqiyiScraper(BaseScraper):
                     self.logger.warning(f"爱奇艺: 目标分集 {target_episode_index} 在获取的列表中未找到 (album_id={base_info.album_id})")
                     return []
 
-            self.logger.debug(f"爱奇艺: 正在为 {len(episodes)} 个分集并发获取真实标题...")
-            
-            # 修正：将并发请求分批处理，以避免因请求过多而触发API速率限制或导致连接错误。
-            # 每次处理5个分集的详情获取，并在批次之间增加1秒的延迟。
-            tasks = [self._get_legacy_video_base_info(ep.link_id) for ep in episodes if ep.link_id]
-            detailed_infos = []
-            batch_size = 5
-            for i in range(0, len(tasks), batch_size):
-                batch = tasks[i:i+batch_size]
-                batch_results = await asyncio.gather(*batch, return_exceptions=True)
-                detailed_infos.extend(batch_results)
-                if i + batch_size < len(tasks):
-                    self.logger.debug(f"爱奇艺: 完成一批 ({len(batch)}) 标题获取，等待1秒...")
-                    await asyncio.sleep(1)
-            
-            specific_title_map = {}
-            for info in detailed_infos:
-                if isinstance(info, IqiyiLegacyVideoInfo) and info.tv_id:
-                    specific_title_map[info.tv_id] = info.video_name
-
-            for ep in episodes:
-                specific_title = specific_title_map.get(ep.tv_id)
-                if specific_title and specific_title != ep.name:
-                    self.logger.debug(f"爱奇艺: 标题替换: '{ep.name}' -> '{specific_title}'")
-                    ep.name = specific_title
+            # 移除低效的标题更新循环，直接使用列表API返回的标题
 
         provider_episodes = [
             models.ProviderEpisodeInfo(
@@ -1043,10 +1194,6 @@ class IqiyiScraper(BaseScraper):
                 self._log_error_context(xml_str, e.lineno, e.position[1])
                 raise
 
-            # 关键修复2：使用绝对路径匹配bulletInfo（根据XML结构）
-            # 从日志样本可知结构：<danmu> -> <data> -> <entry> -> <list> -> <bulletInfo>
-            bullet_count = len(root.xpath('/danmu/data/entry/list/bulletInfo'))
-
             # 提取弹幕信息
             comments = []
             # 遍历绝对路径下的bulletInfo节点
@@ -1145,7 +1292,8 @@ class IqiyiScraper(BaseScraper):
                 color = 16777215 # Default white
 
             timestamp = float(c.show_time)
-            p_string = f"{timestamp:.2f},{mode},{color},[{self.provider_name}]"
+            # 修正：直接在此处添加字体大小 '25'，确保数据源的正确性
+            p_string = f"{timestamp:.2f},{mode},25,{color},[{self.provider_name}]"
             formatted.append({
                 "cid": c.content_id,
                 "p": p_string,
@@ -1156,17 +1304,29 @@ class IqiyiScraper(BaseScraper):
 
     async def get_id_from_url(self, url: str) -> Optional[str]:
         """
-        从爱奇艺视频URL中提取 id。
+        从爱奇艺视频URL中提取 id (tv_id)。
+        优先使用新版 v3 API，失败则回退到旧版。
         """
         link_id_match = re.search(r"v_(\w+?)\.html", url)
         if not link_id_match:
-            self.logger.warning(f"爱奇艺: 无法从URL中解析出 link_id: {url}")
+            self.logger.warning(f"爱奇艺 (get_id): 无法从URL中解析出 link_id: {url}")
             return None
         
         link_id = link_id_match.group(1)
+
+        # 方案1: 尝试新版 v3 API
+        v3_info = await self._get_v3_base_info(link_id)
+        if v3_info and v3_info.current_video_tvid:
+            tvid = str(v3_info.current_video_tvid)
+            self.logger.info(f"爱奇艺 (get_id): v3 API 成功获取 tvid: {tvid}")
+            return tvid
+
+        self.logger.warning(f"爱奇艺 (get_id): v3 API 获取 tvid 失败，回退到旧版 API。")
+
+        # 方案2: 回退到旧版 API
         base_info = await self._get_legacy_video_base_info(link_id)
         if base_info and base_info.tv_id:
-            self.logger.info(f"爱奇艺: 从URL {url} 解析到 tvid: {base_info.tv_id}")
+            self.logger.info(f"爱奇艺 (get_id): 旧版 API 成功获取 tvid: {base_info.tv_id}")
             return str(base_info.tv_id)
         
         self.logger.warning(f"爱奇艺: 未能从 link_id '{link_id}' 获取到 tvid。")

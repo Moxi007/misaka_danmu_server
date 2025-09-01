@@ -133,6 +133,17 @@ export const SearchResult = () => {
     lastSearchResultData.results || []
   )
 
+  useEffect(() => {
+    setSelectList([])
+  }, [renderData])
+
+  useEffect(() => {
+    if (searchLoading) {
+      setYearFilter('all')
+      setProviderFilter('all')
+    }
+  }, [searchLoading])
+
   const importModeText = useMemo(() => {
     const uniqueTitles = new Set(selectList.map(item => item.title))
     if (uniqueTitles.size === 1) {
@@ -912,6 +923,7 @@ export const SearchResult = () => {
                     setEpisodePageSize(size)
                   },
                   hideOnSinglePage: true,
+                  showLessItems: true,
                 }}
                 dataSource={editEpisodeList}
                 renderItem={(item, index) => (

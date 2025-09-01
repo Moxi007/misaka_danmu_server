@@ -218,6 +218,11 @@ class EpisodeDetail(BaseModel):
     fetchedAt: Optional[datetime] = None
     commentCount: int
 
+class PaginatedEpisodesResponse(BaseModel):
+    """用于分集列表分页的响应模型"""
+    total: int
+    episodes: List[EpisodeDetail]
+
 # --- 任务管理器模型 ---
 class TaskInfo(BaseModel):
     taskId: str

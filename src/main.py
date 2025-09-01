@@ -20,7 +20,6 @@ from .webhook_manager import WebhookManager
 from .scheduler import SchedulerManager
 from .config import settings
 from . import crud, security
-from . import migration
 from .log_manager import setup_logging
 from .rate_limiter import RateLimiter
 
@@ -41,9 +40,6 @@ async def lifespan(app: FastAPI):
     # init_db_tables 现在处理数据库创建、引擎和会话工厂的创建
     await init_db_tables(app)
     session_factory = app.state.db_session_factory
-
-    # 新增：在所有管理器初始化之前，执行数据库迁移
-    await migration.run_db_migration(session_factory)
 
     # 新增：在启动时清理任何未完成的任务
     async with session_factory() as session:
@@ -87,8 +83,6 @@ async def lifespan(app: FastAPI):
         'bilibiliCookie': ('', '用于访问B站API的Cookie，特别是buvid3。'),
         'gamerCookie': ('', '用于访问巴哈姆特动画疯的Cookie。'),
         'gamerUserAgent': ('', '用于访问巴哈姆特动画疯的User-Agent。'),
-        "rate_limit_global_limit": ("50", ""),
-        "rate_limit_global_period_seconds": ("3600", ""),
         # 全局过滤
         'search_result_global_blacklist_cn': (r'特典|预告|广告|菜单|花絮|特辑|速看|资讯|彩蛋|直拍|直播回顾|片头|片尾|幕后|映像|番外篇|纪录片|访谈|番外|短片|加更|走心|解忧|纯享|解读|揭秘|赏析', '用于过滤搜索结果标题的全局中文黑名单(正则表达式)。'),
         'search_result_global_blacklist_eng': (r'NC|OP|ED|SP|OVA|OAD|CM|PV|MV|BDMenu|Menu|Bonus|Recap|Teaser|Trailer|Preview|CD|Disc|Scan|Sample|Logo|Info|EDPV|SongSpot|BDSpot', '用于过滤搜索结果标题的全局英文黑名单(正则表达式)。'),
@@ -268,12 +262,13 @@ async def cleanup_task(app: FastAPI):
         except Exception as e:
             logging.getLogger(__name__).error(f"缓存清理任务出错: {e}")
 
-# 新增：显式地挂载外部控制API路由，以确保其优先级
-app.include_router(control_router, prefix="/api/control", tags=["External Control API"])
+
 
 # 包含所有非 dandanplay 的 API 路由
 app.include_router(api_router, prefix="/api")
 
+# 新增：显式地挂载外部控制API路由，以确保其优先级
+app.include_router(control_router, prefix="/api/control", tags=["External Control API"])
 
 app.include_router(dandan_router, prefix="/api/v1", tags=["DanDanPlay Compatible"], include_in_schema=False)
 

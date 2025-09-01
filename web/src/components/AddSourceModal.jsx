@@ -2,6 +2,8 @@ import { Form, Input, Modal, Select, message } from 'antd'
 import { useState } from 'react'
 import { addSourceToAnime } from '../apis'
 import { useMessage } from '../MessageContext'
+import { MyIcon } from '@/components/MyIcon'
+import { generateRandomStr } from '../utils/data'
 
 // 通用数据源列表，将来可以从后端动态获取
 const PROVIDER_OPTIONS = [
@@ -72,7 +74,22 @@ export const AddSourceModal = ({ open, animeId, onCancel, onSuccess }) => {
           rules={[{ required: true, message: '请输入媒体ID！' }]}
           help="对于'自定义'源，可填写任意唯一标识，如'manual-1'。"
         >
-          <Input placeholder="例如：ss28235" />
+          <Input
+            placeholder="例如：ss28235"
+            addonAfter={
+              <div
+                className="cursor-pointer"
+                onClick={() => {
+                  const value = generateRandomStr()
+                  form.setFieldsValue({
+                    mediaId: value,
+                  })
+                }}
+              >
+                <MyIcon icon="refresh" size={20} />
+              </div>
+            }
+          />
         </Form.Item>
       </Form>
     </Modal>

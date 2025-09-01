@@ -159,14 +159,14 @@ class TaskManager:
         return task_id, task.done_event
 
     def _get_progress_callback(self, task: Task) -> Callable:
-        """为特定任务创建一个可暂停且带节流的回调闭包。"""
+        """为特定任务创建一个可暂停的回调闭包。"""
         async def pausable_callback(progress: int, description: str, status: Optional[TaskStatus] = None):
             # 核心暂停逻辑：在每次更新进度前，检查暂停事件。
             # 如果事件被清除 (cleared)，.wait() 将会阻塞，直到事件被重新设置 (set)。
             await task.pause_event.wait()
 
             now = time.time()
-            # 节流逻辑：只在状态改变、首次、完成或距离上次更新超过0.5秒时才更新数据库
+            # 只在状态改变、首次、完成或距离上次更新超过0.5秒时才更新数据库
             is_status_change = status is not None
             force_update = progress == 0 or progress >= 100 or is_status_change
             
@@ -176,7 +176,7 @@ class TaskManager:
                     return
                 task.last_update_time = now
 
-            # 数据库更新现在是同步的（在回调的协程内），但由于节流，它不会频繁发生。
+            # 数据库更新现在是同步的（在回调的协程内），但由于此逻辑，它不会频繁发生。
             # 这避免了创建大量并发任务，从而保护了数据库连接池。
             try:
                 async with self._session_factory() as session:

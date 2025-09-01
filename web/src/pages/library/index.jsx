@@ -619,19 +619,16 @@ export const Library = () => {
       >
         {!!renderData?.length ? (
           <Table
-            pagination={
-              renderData?.length > 50
-                ? {
-                    pageSize: libraryPageSize,
-                    showTotal: total => `共 ${total} 条数据`,
-                    showSizeChanger: true,
-                    showQuickJumper: true,
-                    onShowSizeChange: (_, size) => {
-                      setLibraryPageSize(size)
-                    },
-                  }
-                : null
-            }
+            pagination={{
+              pageSize: libraryPageSize,
+              showTotal: total => `共 ${total} 条数据`,
+              showSizeChanger: true,
+              showQuickJumper: true,
+              hideOnSinglePage: true,
+              onShowSizeChange: (_, size) => {
+                setLibraryPageSize(size)
+              },
+            }}
             size="small"
             dataSource={renderData}
             columns={columns}

@@ -53,9 +53,22 @@ export function parseSearchKeyword(keyword) {
 }
 
 export function isUrl(str) {
-  // 正则表达式匹配URL格式
-  const urlRegex = /^(https?:\/\/)?([\da-z.-]+)\.([a-z.]{2,6})([\/\w.-]*)*\/?$/i
-
-  // 测试字符串是否匹配正则表达式
+  const urlRegex = /^https?:\/\//i
   return urlRegex.test(str)
+}
+
+export function generateRandomStr(len = 15) {
+  const numbers = '0123456789'
+  const upperLetters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
+  const lowerLetters = 'abcdefghijklmnopqrstuvwxyz'
+  const charPool = numbers + upperLetters + lowerLetters
+
+  let result = ''
+  const poolLength = charPool.length
+  for (let i = 0; i < len; i++) {
+    const randomIndex = Math.floor(Math.random() * poolLength)
+    result += charPool[randomIndex]
+  }
+
+  return result
 }

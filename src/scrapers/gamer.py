@@ -32,6 +32,37 @@ class GamerScraper(BaseScraper):
             follow_redirects=True
         )
 
+    async def get_episode_blacklist_pattern(self) -> Optional[re.Pattern]:
+        """
+        获取并编译用于过滤分集的正则表达式。
+        此方法覆盖了基类中的方法，以确保对该源的正确回退逻辑。
+        """
+        # 1. 构造该源特定的配置键，确保与数据库键名一致
+        provider_blacklist_key = f"{self.provider_name}_episode_blacklist_regex"
+        
+        # 2. 从数据库动态获取用户自定义规则
+        custom_blacklist_str = await self.config_manager.get(provider_blacklist_key)
+
+        final_blacklist_str = None
+        # 3. 优先使用用户自定义的、非空的规则
+        if custom_blacklist_str and custom_blacklist_str.strip():
+            self.logger.info(f"正在为 '{self.provider_name}' 使用数据库中的自定义分集黑名单。")
+            final_blacklist_str = custom_blacklist_str
+        # 4. 如果没有自定义规则，则回退到代码中内置的默认规则
+        elif hasattr(self, '_PROVIDER_SPECIFIC_BLACKLIST_DEFAULT') and self._PROVIDER_SPECIFIC_BLACKLIST_DEFAULT:
+            self.logger.info(f"正在为 '{self.provider_name}' 使用代码中内置的默认分集黑名单。")
+            final_blacklist_str = self._PROVIDER_SPECIFIC_BLACKLIST_DEFAULT
+        
+        if final_blacklist_str:
+            try:
+                # 5. 编译正则表达式并返回
+                return re.compile(final_blacklist_str, re.IGNORECASE)
+            except re.error as e:
+                self.logger.error(f"编译 '{self.provider_name}' 的分集黑名单时出错: {e}。规则: '{final_blacklist_str}'")
+        
+        # 6. 如果没有任何规则，返回 None
+        return None
+
     async def _ensure_config(self):
         """
         实时从数据库加载并应用Cookie和User-Agent配置。
@@ -376,7 +407,8 @@ class GamerScraper(BaseScraper):
                     
                     color = int(hex_color.lstrip('#'), 16)
                     
-                    p_string = f"{time_sec:.2f},{mode},{color},[{self.provider_name}]"
+                    # 修正：直接在此处添加字体大小 '25'，确保数据源的正确性
+                    p_string = f"{time_sec:.2f},{mode},25,{color},[{self.provider_name}]"
                     
                     formatted_comments.append({
                         # 修正：使用 'sn' (弹幕流水号) 作为唯一的弹幕ID (cid)，而不是 'userid'，以避免同一用户发送多条弹幕时出现重复键错误。

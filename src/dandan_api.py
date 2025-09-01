@@ -555,94 +555,17 @@ async def get_bangumi_details(
 
     return BangumiDetailsResponse(bangumi=bangumi_details)
 
-async def _process_single_batch_match(item: DandanBatchMatchRequestItem, session: AsyncSession) -> DandanMatchResponse:
-    """处理批量匹配中的单个文件，仅在精确匹配（1个结果）时返回成功。"""
-    parsed_info = _parse_filename_for_match(item.fileName)
-    if not parsed_info:
-        return DandanMatchResponse(isMatched=False)
-
-    # --- 步骤 1: 尝试 TMDB 精确匹配 ---
-    potential_animes = await crud.find_animes_for_matching(session, parsed_info["title"])
-    for anime in potential_animes:
-        if anime.get("tmdbId") and anime.get("tmdbEpisodeGroupId"):
-            tmdb_results = await crud.find_episode_via_tmdb_mapping(
-                session,
-                tmdb_id=anime["tmdbId"],
-                group_id=anime["tmdbEpisodeGroupId"],
-                custom_season=parsed_info.get("season"),
-                custom_episode=parsed_info["episode"]
-            )
-            if tmdb_results:
-                # TMDB 映射是高置信度的，直接取第一个结果
-                res = tmdb_results[0]
-                dandan_type = DANDAN_TYPE_MAPPING.get(res.get('type'), "other")
-                dandan_type_desc = DANDAN_TYPE_DESC_MAPPING.get(res.get('type'), "其他")
-                match = DandanMatchInfo(
-                    episodeId=res['episodeId'], animeId=res['animeId'], animeTitle=res['animeTitle'],
-                    episodeTitle=res['episodeTitle'], type=dandan_type, typeDescription=dandan_type_desc,
-                )
-                return DandanMatchResponse(isMatched=True, matches=[match])
-
-    # --- 步骤 2: 回退到旧的模糊搜索逻辑 ---
-    results = await crud.search_episodes_in_library(
-        session, parsed_info["title"], parsed_info["episode"], parsed_info.get("season")
-    )
-
-    # 优先处理被精确标记的源
-    favorited_results = [r for r in results if r.get('isFavorited')]
-    if favorited_results:
-        res = favorited_results[0]
-        dandan_type = DANDAN_TYPE_MAPPING.get(res.get('type'), "other")
-        dandan_type_desc = DANDAN_TYPE_DESC_MAPPING.get(res.get('type'), "其他")
-
-        match = DandanMatchInfo(
-            episodeId=res['episodeId'],
-            animeId=res['animeId'],
-            animeTitle=res['animeTitle'],
-            episodeTitle=res['episodeTitle'],
-            type=dandan_type,
-            typeDescription=dandan_type_desc,
-        )
-        return DandanMatchResponse(isMatched=True, matches=[match])
-
-    # 如果没有精确标记，则只有当结果唯一时才算成功
-    if len(results) == 1:
-        res = results[0]
-        dandan_type = DANDAN_TYPE_MAPPING.get(res.get('type'), "other")
-        dandan_type_desc = DANDAN_TYPE_DESC_MAPPING.get(res.get('type'), "其他")
-
-        match = DandanMatchInfo(
-            episodeId=res['episodeId'],
-            animeId=res['animeId'],
-            animeTitle=res['animeTitle'],
-            episodeTitle=res['episodeTitle'],
-            type=dandan_type,
-            typeDescription=dandan_type_desc,
-        )
-        return DandanMatchResponse(isMatched=True, matches=[match])
-    
-    return DandanMatchResponse(isMatched=False)
-
-@implementation_router.post(
-    "/match",
-    response_model=DandanMatchResponse,
-    summary="[dandanplay兼容] 匹配单个文件"
-)
-async def match_single_file(
-    request: DandanBatchMatchRequestItem,
-    token: str = Depends(get_token_from_path),
-    session: AsyncSession = Depends(get_db_session)
-):
+async def _get_match_for_item(item: DandanBatchMatchRequestItem, session: AsyncSession) -> DandanMatchResponse:
     """
-    通过文件名匹配弹幕库。此接口不使用文件Hash。
+    通过文件名匹配弹幕库的核心逻辑。此接口不使用文件Hash。
     优先进行库内直接匹配，失败后回退到TMDB剧集组映射。
     """
-    logger.info(f"收到 /match 请求, 文件名: '{request.fileName}'")
-    parsed_info = _parse_filename_for_match(request.fileName)
+    logger.info(f"执行匹配逻辑, 文件名: '{item.fileName}'")
+    parsed_info = _parse_filename_for_match(item.fileName)
     logger.info(f"文件名解析结果: {parsed_info}")
     if not parsed_info:
         response = DandanMatchResponse(isMatched=False)
-        logger.info(f"发送 /match 响应 (解析失败): {response.model_dump_json(indent=2)}")
+        logger.info(f"发送匹配响应 (解析失败): {response.model_dump_json(indent=2)}")
         return response
 
     # --- 步骤 1: 优先进行库内直接搜索 ---
@@ -681,7 +604,7 @@ async def match_single_file(
                     episodeTitle=res['episodeTitle'], type=dandan_type, typeDescription=dandan_type_desc,
                 )
                 response = DandanMatchResponse(isMatched=True, matches=[match])
-                logger.info(f"发送 /match 响应 (精确标记匹配): {response.model_dump_json(indent=2)}")
+                logger.info(f"发送匹配响应 (精确标记匹配): {response.model_dump_json(indent=2)}")
                 return response
 
             # 如果没有精确标记，检查所有匹配项是否都指向同一个番剧ID
@@ -697,7 +620,7 @@ async def match_single_file(
                     episodeTitle=res['episodeTitle'], type=dandan_type, typeDescription=dandan_type_desc,
                 )
                 response = DandanMatchResponse(isMatched=True, matches=[match])
-                logger.info(f"发送 /match 响应 (单一作品匹配): {response.model_dump_json(indent=2)}")
+                logger.info(f"发送匹配响应 (单一作品匹配): {response.model_dump_json(indent=2)}")
                 return response
 
             # 如果匹配到了多个不同的番剧，则返回所有结果让用户选择
@@ -710,7 +633,7 @@ async def match_single_file(
                     episodeTitle=res['episodeTitle'], type=dandan_type, typeDescription=dandan_type_desc,
                 ))
             response = DandanMatchResponse(isMatched=False, matches=matches)
-            logger.info(f"发送 /match 响应 (多个匹配): {response.model_dump_json(indent=2)}")
+            logger.info(f"发送匹配响应 (多个匹配): {response.model_dump_json(indent=2)}")
             return response
 
     # --- 步骤 2: 如果直接搜索无果，则回退到 TMDB 映射 ---
@@ -738,13 +661,29 @@ async def match_single_file(
                     episodeTitle=res['episodeTitle'], type=dandan_type, typeDescription=dandan_type_desc,
                 )
                 response = DandanMatchResponse(isMatched=True, matches=[match])
-                logger.info(f"发送 /match 响应 (TMDB 映射匹配): {response.model_dump_json(indent=2)}")
+                logger.info(f"发送匹配响应 (TMDB 映射匹配): {response.model_dump_json(indent=2)}")
                 return response
 
     # --- 步骤 3: 如果所有方法都失败 ---
     response = DandanMatchResponse(isMatched=False, matches=[])
-    logger.info(f"发送 /match 响应 (所有方法均未匹配): {response.model_dump_json(indent=2)}")
+    logger.info(f"发送匹配响应 (所有方法均未匹配): {response.model_dump_json(indent=2)}")
     return response
+
+@implementation_router.post(
+    "/match",
+    response_model=DandanMatchResponse,
+    summary="[dandanplay兼容] 匹配单个文件"
+)
+async def match_single_file(
+    request: DandanBatchMatchRequestItem,
+    token: str = Depends(get_token_from_path),
+    session: AsyncSession = Depends(get_db_session)
+):
+    """
+    通过文件名匹配弹幕库。此接口不使用文件Hash。
+    优先进行库内直接匹配，失败后回退到TMDB剧集组映射。
+    """
+    return await _get_match_for_item(request, session)
 
 
 @implementation_router.post(
@@ -758,12 +697,12 @@ async def match_batch_files(
     session: AsyncSession = Depends(get_db_session)
 ):
     """
-    批量匹配文件，只返回精确匹配（1个结果）的项。
+    批量匹配文件。
     """
     if len(request.requests) > 32:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="批量匹配请求不能超过32个文件。")
 
-    tasks = [_process_single_batch_match(item, session) for item in request.requests]
+    tasks = [_get_match_for_item(item, session) for item in request.requests]
     results = await asyncio.gather(*tasks)
     return results
 

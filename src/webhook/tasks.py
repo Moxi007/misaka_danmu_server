@@ -128,7 +128,7 @@ async def webhook_search_and_dispatch_task(
         task_coro = lambda session, cb: generic_import_task(
             provider=best_match.provider, mediaId=best_match.mediaId, year=year,
             animeTitle=best_match.title, mediaType=best_match.type,
-            season=season, currentEpisodeIndex=best_match.currentEpisodeIndex, imageUrl=best_match.imageUrl, metadata_manager=metadata_manager,
+            season=season, currentEpisodeIndex=currentEpisodeIndex, imageUrl=best_match.imageUrl, metadata_manager=metadata_manager,
             doubanId=doubanId, tmdbId=tmdbId, imdbId=imdbId, tvdbId=tvdbId, bangumiId=bangumiId, rate_limiter=rate_limiter,
             progress_callback=cb, session=session, manager=manager,  # 修正：使用由TaskManager提供的session和cb
             task_manager=task_manager

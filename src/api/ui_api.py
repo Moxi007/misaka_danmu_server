@@ -581,7 +581,9 @@ async def get_source_episodes(
     session: AsyncSession = Depends(get_db_session)
 ):
     """获取指定数据源下的所有已收录分集列表。"""
-    return await crud.get_episodes_for_source(session, sourceId)
+    paginated_result = await crud.get_episodes_for_source(session, sourceId)
+    # 修正：从分页结果中提取分集列表，以匹配 response_model
+    return paginated_result.get("episodes", [])
 
 @router.put("/library/episode/{episodeId}", status_code=status.HTTP_204_NO_CONTENT, summary="编辑分集信息")
 async def edit_episode_info(
@@ -827,28 +829,24 @@ async def get_metadata_source_settings(
 async def update_metadata_source_settings(
     settings: List[models.MetadataSourceSettingUpdate],
     current_user: models.User = Depends(security.get_current_user),
-    session: AsyncSession = Depends(get_db_session),
     manager: MetadataSourceManager = Depends(get_metadata_manager)
 ):
     """批量更新元数据源的启用状态、辅助搜索状态和显示顺序。"""
-    # 修正：恢复使用专用的 `metadata_sources` 表来存储设置，
-    # 这将调用 `crud.py` 中正确的函数，并解决之前遇到的状态保存问题。
-    await crud.update_metadata_sources_settings(session, settings)
-    # 新增：触发 MetadataSourceManager 重新加载设置，以使更改立即生效。
-    await manager.load_and_sync_sources()
+    # 修正：调用管理器的专用更新方法，而不是直接操作CRUD。
+    # 管理器将负责更新数据库并刷新其内部缓存，确保设置立即生效。
+    await manager.update_source_settings(settings)
     logger.info(f"用户 '{current_user.username}' 更新了元数据源设置，已重新加载。")
 
 @router.put("/scrapers", status_code=status.HTTP_204_NO_CONTENT, summary="更新搜索源的设置")
 async def update_scraper_settings(
     settings: List[models.ScraperSetting],
     current_user: models.User = Depends(security.get_current_user),
-    session: AsyncSession = Depends(get_db_session),
     manager: ScraperManager = Depends(get_scraper_manager)
 ):
     """批量更新搜索源的启用状态和显示顺序。"""
-    await crud.update_scrapers_settings(session, settings)
-    # 更新数据库后，触发 ScraperManager 重新加载搜索源
-    await manager.load_and_sync_scrapers()
+    # 修正：与元数据源类似，调用管理器的专用方法来确保实时性。
+    # 这需要您在 ScraperManager 中也添加一个类似的 update_settings 方法。
+    await manager.update_settings(settings)
     logger.info(f"用户 '{current_user.username}' 更新了搜索源设置，已重新加载。")
     return
 
@@ -863,8 +861,8 @@ async def get_proxy_settings(
     session: AsyncSession = Depends(get_db_session)
 ):
     """获取全局代理配置。"""
-    proxy_url_task = crud.get_config_value(session, "proxy_url", "")
-    proxy_enabled_task = crud.get_config_value(session, "proxy_enabled", "false")
+    proxy_url_task = crud.get_config_value(session, "proxyUrl", "")
+    proxy_enabled_task = crud.get_config_value(session, "proxyEnabled", "false")
     proxy_url, proxy_enabled_str = await asyncio.gather(proxy_url_task, proxy_enabled_task)
 
     proxy_enabled = proxy_enabled_str.lower() == 'true'
@@ -911,11 +909,11 @@ async def update_proxy_settings(
         
         proxy_url = f"{payload.proxyProtocol}://{userinfo}{payload.proxyHost}:{payload.proxyPort}"
 
-    await crud.update_config_value(session, "proxy_url", proxy_url)
-    config_manager.invalidate("proxy_url")
+    await crud.update_config_value(session, "proxyUrl", proxy_url)
+    config_manager.invalidate("proxyUrl")
     
-    await crud.update_config_value(session, "proxy_enabled", str(payload.proxyEnabled).lower())
-    config_manager.invalidate("proxy_enabled")
+    await crud.update_config_value(session, "proxyEnabled", str(payload.proxyEnabled).lower())
+    config_manager.invalidate("proxyEnabled")
     logger.info(f"用户 '{current_user.username}' 更新了代理配置。")
 
 class ProxyTestRequest(BaseModel):
@@ -1490,7 +1488,13 @@ async def get_comments(
 
     comments_data = await crud.fetch_comments(session, episodeId)
     
-    comments = [models.Comment(cid=item["cid"], p=item["p"], m=item["m"]) for item in comments_data]
+    # 修正：使用 enumerate 为弹幕生成一个从0开始的自增ID (cid)。
+    # 弹幕文件本身不包含此ID，而API响应需要它，尤其对于前端（例如作为React的key）。
+    # 这也使其行为与 dandan_api 中的弹幕接口保持一致。
+    comments = [
+        models.Comment(cid=i, p=item.get("p", ""), m=item.get("m", ""))
+        for i, item in enumerate(comments_data)
+    ]
     return models.CommentResponse(count=len(comments), comments=comments)
 
 @router.get("/webhooks/available", response_model=List[str], summary="获取所有可用的Webhook类型")
@@ -2081,21 +2085,6 @@ async def get_available_jobs(request: Request):
     jobs = scheduler_manager.get_available_jobs()
     logger.info(f"可用的任务类型: {jobs}")
     return jobs
-@router.get("/scheduled-tasks", response_model=List[models.ScheduledTaskInfo], summary="获取所有定时任务")
-async def get_all_scheduled_tasks(
-    session: AsyncSession = Depends(get_db_session),
-    current_user: models.User = Depends(security.get_current_user)
-):
-    """
-    获取所有已配置的定时任务列表。
-    此实现确保即使没有任务，也总是返回一个空的JSON数组 `[]`，而不是 `null` 或空白响应。
-    """
-    tasks = await crud.get_scheduled_tasks(session)
-    # 关键修复：确保在没有任务时返回一个空列表，而不是 None
-    return tasks or []
-
-
-# --- Scheduled Tasks API ---
 
 @router.get("/scheduled-tasks", response_model=List[models.ScheduledTaskInfo], summary="获取所有定时任务")
 async def get_scheduled_tasks(

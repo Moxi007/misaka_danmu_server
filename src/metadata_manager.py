@@ -178,6 +178,20 @@ class MetadataSourceManager:
         
         return sorted(full_status_list, key=lambda x: x['displayOrder'])
 
+    async def update_source_settings(self, settings_payload: List[models.MetadataSourceSettingUpdate]):
+        """
+        Updates settings for multiple metadata sources and reloads them to reflect changes immediately.
+        This is the correct way to update settings as it ensures the in-memory cache is invalidated.
+        """
+        async with self._session_factory() as session:
+            # The CRUD function handles the update logic and commits the transaction.
+            await crud.update_metadata_sources_settings(session, settings_payload)
+        
+        # After updating the DB, reload all sources to apply the new settings.
+        # This ensures that enable/disable, proxy settings, etc., take effect immediately.
+        await self.load_and_sync_sources()
+        self.logger.info("元数据源设置已更新并重新加载。")
+
     async def get_failover_comments(self, title: str, season: int, episode_index: int, user: models.User) -> Optional[List[dict]]:
         """
         Iterates through enabled failover sources to find comments for a specific episode.

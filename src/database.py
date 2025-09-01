@@ -11,142 +11,72 @@ from .orm_models import Base
 # 使用模块级日志记录器
 logger = logging.getLogger(__name__)
 
-async def _migrate_add_anime_year(conn, db_type, db_name):
-    """迁移任务: 确保 anime.year 字段存在，并移除旧的 source_url 字段。"""
-    migration_id = "add_anime_year_and_drop_source_url"
+async def _migrate_add_source_order(conn, db_type, db_name):
+    """
+    迁移任务: 确保 anime_sources 表有持久化的 source_order 字段。
+    这是一个关键迁移，用于修复因动态计算源顺序而导致的数据覆盖问题。
+    """
+    migration_id = "add_source_order_to_anime_sources"
     logger.info(f"正在检查是否需要执行迁移: {migration_id}...")
 
+    # --- 1. 检查并添加 source_order 列 (初始为可空) ---
     if db_type == "mysql":
-        check_source_url_sql = text(f"SELECT 1 FROM information_schema.columns WHERE table_schema = '{db_name}' AND table_name = 'anime' AND column_name = 'source_url'")
-        check_year_sql = text(f"SELECT 1 FROM information_schema.columns WHERE table_schema = '{db_name}' AND table_name = 'anime' AND column_name = 'year'")
-        add_year_sql = text("ALTER TABLE anime ADD COLUMN `year` INT NULL DEFAULT NULL AFTER `episode_count`")
-        drop_source_url_sql = text("ALTER TABLE anime DROP COLUMN source_url")
+        check_column_sql = text(f"SELECT 1 FROM information_schema.columns WHERE table_schema = '{db_name}' AND table_name = 'anime_sources' AND column_name = 'source_order'")
+        add_column_sql = text("ALTER TABLE anime_sources ADD COLUMN `source_order` INT NULL")
     elif db_type == "postgresql":
-        check_source_url_sql = text("SELECT 1 FROM information_schema.columns WHERE table_name = 'anime' AND column_name = 'source_url'")
-        check_year_sql = text("SELECT 1 FROM information_schema.columns WHERE table_name = 'anime' AND column_name = 'year'")
-        add_year_sql = text('ALTER TABLE anime ADD COLUMN "year" INT NULL')
-        drop_source_url_sql = text("ALTER TABLE anime DROP COLUMN source_url")
+        check_column_sql = text("SELECT 1 FROM information_schema.columns WHERE table_name = 'anime_sources' AND column_name = 'source_order'")
+        add_column_sql = text('ALTER TABLE anime_sources ADD COLUMN "source_order" INT NULL')
     else:
         return
 
-    has_source_url = (await conn.execute(check_source_url_sql)).scalar_one_or_none() is not None
-    has_year = (await conn.execute(check_year_sql)).scalar_one_or_none() is not None
-
-    if not has_year:
-        logger.info(f"列 'anime.year' 不存在。正在添加...")
-        await conn.execute(add_year_sql)
-        logger.info(f"成功添加列 'anime.year'。")
-
-    if has_source_url:
-        logger.info(f"发现过时的列 'anime.source_url'。正在删除...")
-        await conn.execute(drop_source_url_sql)
-        logger.info(f"成功删除列 'anime.source_url'。")
-    logger.info(f"迁移任务 '{migration_id}' 检查完成。")
-
-async def _migrate_add_scheduled_task_id(conn, db_type, db_name):
-    """
-    迁移任务: 确保 task_history.scheduled_task_id 字段存在。
-    """
-    migration_id = "add_scheduled_task_id_to_task_history"
-    logger.info(f"正在检查是否需要执行迁移: {migration_id}...")
-
-    if db_type == "mysql":
-        check_sql = text(f"SELECT 1 FROM information_schema.columns WHERE table_schema = '{db_name}' AND table_name = 'task_history' AND column_name = 'scheduled_task_id'")
-        add_sql = text("ALTER TABLE task_history ADD COLUMN `scheduled_task_id` VARCHAR(100) NULL DEFAULT NULL AFTER `id`, ADD INDEX `ix_task_history_scheduled_task_id` (`scheduled_task_id`)")
-    elif db_type == "postgresql":
-        check_sql = text("SELECT 1 FROM information_schema.columns WHERE table_name = 'task_history' AND column_name = 'scheduled_task_id'")
-        # 修正：将SQL语句拆分为两个，以兼容PostgreSQL
-        add_column_sql = text('ALTER TABLE task_history ADD COLUMN "scheduled_task_id" VARCHAR(100) NULL')
-        create_index_sql = text('CREATE INDEX ix_task_history_scheduled_task_id ON task_history ("scheduled_task_id")')
-    else:
-        return
-
-    column_exists = (await conn.execute(check_sql)).scalar_one_or_none() is not None
+    column_exists = (await conn.execute(check_column_sql)).scalar_one_or_none() is not None
     if not column_exists:
-        logger.info(f"列 'task_history.scheduled_task_id' 不存在。正在添加...")
+        logger.info("列 'anime_sources.source_order' 不存在。正在添加...")
+        await conn.execute(add_column_sql)
+        logger.info("成功添加列 'anime_sources.source_order'。")
+
+        # --- 2. 为现有数据填充 source_order ---
+        logger.info("正在为现有数据填充 'source_order'...")
+        distinct_anime_ids_res = await conn.execute(text("SELECT DISTINCT anime_id FROM anime_sources"))
+        distinct_anime_ids = distinct_anime_ids_res.scalars().all()
+
+        for anime_id in distinct_anime_ids:
+            sources_res = await conn.execute(text(f"SELECT id FROM anime_sources WHERE anime_id = {anime_id} ORDER BY id"))
+            sources_ids = sources_res.scalars().all()
+            for i, source_id in enumerate(sources_ids):
+                order = i + 1
+                await conn.execute(text(f"UPDATE anime_sources SET source_order = {order} WHERE id = {source_id}"))
+        logger.info("成功填充 'source_order' 数据。")
+
+        # --- 3. 将列修改为 NOT NULL ---
+        logger.info("正在将 'source_order' 列修改为 NOT NULL...")
         if db_type == "mysql":
-            await conn.execute(add_sql)
-        elif db_type == "postgresql":
-            await conn.execute(add_column_sql)
-            await conn.execute(create_index_sql)
-        logger.info(f"成功添加列 'task_history.scheduled_task_id'。")
-    logger.info(f"迁移任务 '{migration_id}' 检查完成。")
+            alter_not_null_sql = text("ALTER TABLE anime_sources MODIFY COLUMN `source_order` INT NOT NULL")
+        else: # postgresql
+            alter_not_null_sql = text('ALTER TABLE anime_sources ALTER COLUMN "source_order" SET NOT NULL')
+        await conn.execute(alter_not_null_sql)
+        logger.info("成功将 'source_order' 列修改为 NOT NULL。")
 
-async def _migrate_add_failover_enabled_to_metadata_sources(conn, db_type, db_name):
-    """
-    迁移任务: 确保 metadata_sources.is_failover_enabled 字段存在。
-    """
-    migration_id = "add_failover_enabled_to_metadata_sources"
-    logger.info(f"正在检查是否需要执行迁移: {migration_id}...")
-
+    # --- 4. 检查并添加唯一约束 ---
+    # 即使列已存在，约束也可能不存在
     if db_type == "mysql":
-        check_sql = text(f"SELECT 1 FROM information_schema.columns WHERE table_schema = '{db_name}' AND table_name = 'metadata_sources' AND column_name = 'is_failover_enabled'")
-        add_sql = text("ALTER TABLE metadata_sources ADD COLUMN `is_failover_enabled` BOOLEAN NOT NULL DEFAULT FALSE")
-    elif db_type == "postgresql":
-        check_sql = text("SELECT 1 FROM information_schema.columns WHERE table_name = 'metadata_sources' AND column_name = 'is_failover_enabled'")
-        add_sql = text('ALTER TABLE metadata_sources ADD COLUMN "is_failover_enabled" BOOLEAN NOT NULL DEFAULT FALSE')
-    else:
-        return
+        check_constraint_sql = text(f"SELECT 1 FROM information_schema.table_constraints WHERE table_schema = '{db_name}' AND table_name = 'anime_sources' AND constraint_name = 'idx_anime_source_order_unique'")
+        add_constraint_sql = text("ALTER TABLE anime_sources ADD CONSTRAINT idx_anime_source_order_unique UNIQUE (anime_id, source_order)")
+    else: # postgresql
+        check_constraint_sql = text("SELECT 1 FROM pg_constraint WHERE conname = 'idx_anime_source_order_unique'")
+        add_constraint_sql = text('ALTER TABLE anime_sources ADD CONSTRAINT idx_anime_source_order_unique UNIQUE (anime_id, source_order)')
 
-    column_exists = (await conn.execute(check_sql)).scalar_one_or_none() is not None
-    if not column_exists:
-        logger.info(f"列 'metadata_sources.is_failover_enabled' 不存在。正在添加...")
-        await conn.execute(add_sql)
-        logger.info(f"成功添加列 'metadata_sources.is_failover_enabled'。")
+    constraint_exists = (await conn.execute(check_constraint_sql)).scalar_one_or_none() is not None
+    if not constraint_exists:
+        logger.info("唯一约束 'idx_anime_source_order_unique' 不存在。正在添加...")
+        try:
+            await conn.execute(add_constraint_sql)
+            logger.info("成功添加唯一约束 'idx_anime_source_order_unique'。")
+        except Exception as e:
+            logger.error(f"添加唯一约束失败: {e}。这可能是由于数据中存在重复的 (anime_id, source_order) 对。请手动检查并清理数据。")
+
     logger.info(f"迁移任务 '{migration_id}' 检查完成。")
 
-async def _migrate_alter_danmaku_file_path_length(conn, db_type, db_name):
-    """迁移任务: 确保 episode.danmaku_file_path 字段有足够的长度。"""
-    migration_id = "alter_danmaku_file_path_length"
-    new_length = 1024
-    logger.info(f"正在检查是否需要执行迁移: {migration_id}...")
-
-    if db_type == "mysql":
-        check_sql = text(f"SELECT CHARACTER_MAXIMUM_LENGTH FROM information_schema.columns WHERE table_schema = '{db_name}' AND table_name = 'episode' AND column_name = 'danmaku_file_path'")
-        alter_sql = text(f"ALTER TABLE episode MODIFY COLUMN `danmaku_file_path` VARCHAR({new_length})")
-    elif db_type == "postgresql":
-        check_sql = text("SELECT character_maximum_length FROM information_schema.columns WHERE table_name = 'episode' AND column_name = 'danmaku_file_path'")
-        alter_sql = text(f'ALTER TABLE episode ALTER COLUMN "danmaku_file_path" TYPE VARCHAR({new_length})')
-    else:
-        return
-
-    current_length = (await conn.execute(check_sql)).scalar_one_or_none()
-    
-    # 检查列是否存在及其长度是否小于期望值
-    if current_length is not None and current_length < new_length:
-        logger.info(f"列 'episode.danmaku_file_path' 当前长度为 {current_length}，小于目标长度 {new_length}。正在扩展...")
-        await conn.execute(alter_sql)
-        logger.info(f"成功将列 'episode.danmaku_file_path' 扩展到 {new_length}。")
-    else:
-        logger.info(f"列 'episode.danmaku_file_path' 无需扩展。")
-    logger.info(f"迁移任务 '{migration_id}' 检查完成。")
-
-async def _migrate_alter_source_url_to_text(conn, db_type, db_name):
-    """迁移任务: 确保 episode.source_url 字段为 TEXT 类型以支持长 URL。"""
-    migration_id = "alter_source_url_to_text"
-    logger.info(f"正在检查是否需要执行迁移: {migration_id}...")
-
-    if db_type == "mysql":
-        # 对于MySQL, VARCHAR在information_schema中有一个长度，而TEXT类型没有。
-        check_sql = text(f"SELECT DATA_TYPE FROM information_schema.columns WHERE table_schema = '{db_name}' AND table_name = 'episode' AND column_name = 'source_url'")
-        alter_sql = text("ALTER TABLE episode MODIFY COLUMN `source_url` TEXT")
-    elif db_type == "postgresql":
-        check_sql = text("SELECT data_type FROM information_schema.columns WHERE table_name = 'episode' AND column_name = 'source_url'")
-        alter_sql = text('ALTER TABLE episode ALTER COLUMN "source_url" TYPE TEXT')
-    else:
-        return
-
-    result = await conn.execute(check_sql)
-    current_type = result.scalar_one_or_none()
-    
-    # 如果列存在且其类型不是某种形式的TEXT，则进行修改。
-    if current_type and 'text' not in current_type.lower():
-        logger.info(f"列 'episode.source_url' 当前类型为 {current_type}，正在修改为 TEXT...")
-        await conn.execute(alter_sql)
-        logger.info(f"成功将列 'episode.source_url' 修改为 TEXT。")
-    else:
-        logger.info(f"列 'episode.source_url' 无需修改。")
-    logger.info(f"迁移任务 '{migration_id}' 检查完成。")
 
 async def _run_migrations(conn):
     """
@@ -159,11 +89,7 @@ async def _run_migrations(conn):
         logger.warning(f"不支持为数据库类型 '{db_type}' 自动执行迁移。")
         return
 
-    await _migrate_add_anime_year(conn, db_type, db_name)
-    await _migrate_add_scheduled_task_id(conn, db_type, db_name)
-    await _migrate_add_failover_enabled_to_metadata_sources(conn, db_type, db_name)
-    await _migrate_alter_danmaku_file_path_length(conn, db_type, db_name)
-    await _migrate_alter_source_url_to_text(conn, db_type, db_name)
+    await _migrate_add_source_order(conn, db_type, db_name)
 
 def _log_db_connection_error(context_message: str, e: Exception):
     """Logs a standardized, detailed error message for database connection failures."""

@@ -35,6 +35,7 @@ class AnimeSource(Base):
     __tablename__ = "anime_sources"
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     animeId: Mapped[int] = mapped_column("anime_id", ForeignKey("anime.id", ondelete="CASCADE"))
+    sourceOrder: Mapped[int] = mapped_column("source_order", Integer)
     providerName: Mapped[str] = mapped_column("provider_name", String(50))
     mediaId: Mapped[str] = mapped_column("media_id", String(255))
     isFavorited: Mapped[bool] = mapped_column("is_favorited", Boolean, default=False)
@@ -45,7 +46,10 @@ class AnimeSource(Base):
     anime: Mapped["Anime"] = relationship(back_populates="sources")
     episodes: Mapped[List["Episode"]] = relationship(back_populates="source", cascade="all, delete-orphan")
 
-    __table_args__ = (UniqueConstraint('anime_id', 'provider_name', 'media_id', name='idx_anime_provider_media_unique'),)
+    __table_args__ = (
+        UniqueConstraint('anime_id', 'provider_name', 'media_id', name='idx_anime_provider_media_unique'),
+        UniqueConstraint('anime_id', 'source_order', name='idx_anime_source_order_unique'),
+    )
 
 class Episode(Base):
     __tablename__ = "episode"
@@ -55,7 +59,7 @@ class Episode(Base):
     episodeIndex: Mapped[int] = mapped_column("episode_index", Integer)
     providerEpisodeId: Mapped[Optional[str]] = mapped_column("provider_episode_id", String(255))
     sourceUrl: Mapped[Optional[str]] = mapped_column("source_url", TEXT) # type: ignore
-    danmakuFilePath: Mapped[Optional[str]] = mapped_column("danmaku_file_path", String(512)) # 新增：存储弹幕文件的相对路径
+    danmakuFilePath: Mapped[Optional[str]] = mapped_column("danmaku_file_path", String(1024)) # 新增：存储弹幕文件的相对路径
     fetchedAt: Mapped[Optional[datetime]] = mapped_column("fetched_at", TIMESTAMP(timezone=True))
     commentCount: Mapped[int] = mapped_column("comment_count", Integer, default=0)
 

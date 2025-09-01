@@ -12,7 +12,7 @@ from cryptography.hazmat.primitives import hashes, serialization, asymmetric
 
 from .scrapers.base import BaseScraper
 from .config_manager import ConfigManager
-from .models import ProviderSearchInfo
+from .models import ProviderSearchInfo, ScraperSetting
 from . import crud
 
 if TYPE_CHECKING:
@@ -209,6 +209,21 @@ class ScraperManager:
             logging.getLogger(__name__).info("搜索源签名验证已禁用。所有搜索源将被视为已验证。")
 
         await self.load_and_sync_scrapers()
+
+    async def update_settings(self, settings: List[ScraperSetting]):
+        """
+        更新多个搜索源的设置，并立即重新加载以使更改生效。
+        这是更新设置的正确方式，因为它能确保内存中的缓存失效。
+        """
+        async with self._session_factory() as session:
+            # CRUD函数负责处理更新逻辑并提交事务。
+            await crud.update_scrapers_settings(session, settings)
+        
+        # 更新数据库后，重新加载所有搜索源以应用新设置。
+        # 这能确保启用/禁用、代理设置等立即生效。
+        await self.load_and_sync_scrapers()
+        # 使用标准日志记录器
+        logging.getLogger(__name__).info("搜索源设置已更新并重新加载。")
 
     @property
     def has_enabled_scrapers(self) -> bool:

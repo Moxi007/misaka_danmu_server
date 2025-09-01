@@ -155,10 +155,10 @@ class BaseScraper(ABC):
         """动态检查是否应记录原始响应，确保配置实时生效。"""
         if not self.is_loggable:
             return False
-        
-        # 修正：将配置键名标准化为 snake_case (log_raw_responses)，以提高项目内一致性。
-        # 之前的键名 "logRawResponses" 可能与前端或数据库中的实际键名不匹配。
-        is_enabled_str = await self.config_manager.get("log_raw_responses", "false")
+
+        # 修正：使用特定于提供商的配置键，例如 'scraper_tencent_log_responses'
+        config_key = f"scraper_{self.provider_name}_log_responses"
+        is_enabled_str = await self.config_manager.get(config_key, "false")
         # 健壮性检查：同时处理布尔值和字符串 "true"，以防配置值类型不确定。
         if isinstance(is_enabled_str, bool):
             return is_enabled_str
