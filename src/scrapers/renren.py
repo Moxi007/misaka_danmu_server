@@ -286,9 +286,17 @@ class RenrenScraper(BaseScraper):
             resp.raise_for_status()
             decoded = auto_decode(resp.text)
             data = RrspSearchResult.model_validate(decoded)
+            
+            # 提取搜索关键词用于匹配
+            search_keyword = parse_search_keyword(keyword)['title'].lower()
+            
             for item in data.data.searchDramaList:
-                # provider mediaId is drama id
                 title_clean = re.sub(r"<[^>]+>", "", item.title).replace(":", "：")
+                
+                # 关键词匹配筛选：只保留标题中包含完整搜索关键词的结果
+                if search_keyword not in title_clean.lower():
+                    continue
+                    
                 media_type = "tv_series"  # 人人视频以剧集为主，若将来提供电影可再细分
                 episode_count = item.episode_total
                 if not episode_count:
@@ -307,7 +315,7 @@ class RenrenScraper(BaseScraper):
         except Exception as e:
             self.logger.error(f"renren: 网络搜索 '{keyword}' 失败: {e}", exc_info=True)
 
-        self.logger.info(f"renren: 网络搜索 '{keyword}' 完成，找到 {len(results)} 个结果。")
+        self.logger.info(f"renren: 网络搜索 '{keyword}' 完成，筛选后找到 {len(results)} 个结果。")
         if results:
             log_results = "\n".join([f"  - {r.title} (ID: {r.mediaId}, 类型: {r.type}, 年份: {r.year or 'N/A'})" for r in results])
             self.logger.info(f"renren: 搜索结果列表:\n{log_results}")
