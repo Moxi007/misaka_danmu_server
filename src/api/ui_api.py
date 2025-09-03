@@ -640,6 +640,64 @@ async def reorder_source_episodes(
     logger.info(f"用户 '{current_user.username}' 提交了重整源 ID: {sourceId} 集数的任务 (Task ID: {task_id})。")
     return {"message": f"重整集数任务 '{task_title}' 已提交。", "taskId": task_id}
 
+@router.post("/library/episodes/offset", status_code=status.HTTP_202_ACCEPTED, summary="偏移选中分集的集数", response_model=UITaskResponse)
+async def offset_episodes(
+    request_data: models.EpisodeOffsetRequest,
+    current_user: models.User = Depends(security.get_current_user),
+    session: AsyncSession = Depends(get_db_session),
+    task_manager: TaskManager = Depends(get_task_manager)
+):
+    """提交一个后台任务，对选中的分集进行集数偏移。"""
+    if not request_data.episodeIds:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="episodeIds 列表不能为空。")
+    
+    # 1. 在提交任务前，先进行快速验证，以提供即时反馈
+    min_index_res = await session.execute(
+        select(func.min(orm_models.Episode.episodeIndex))
+        .where(orm_models.Episode.id.in_(request_data.episodeIds))
+    )
+    min_index = min_index_res.scalar_one_or_none()
+
+    if min_index is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="找不到任何一个选中的分集。")
+
+    # 2. 检查偏移后的集数是否会小于1
+    if (min_index + request_data.offset) < 1:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"操作无效：偏移后的最小集数将为 {min_index + request_data.offset}，集数必须大于0。"
+        )
+
+
+    # 获取一个代表性的标题用于任务日志
+    first_episode = await session.get(
+        orm_models.Episode, 
+        request_data.episodeIds[0], 
+        options=[selectinload(orm_models.Episode.source).selectinload(orm_models.AnimeSource.anime)]
+    )
+    # 此检查现在是多余的，因为上面的 min_index 检查已经覆盖了，但保留它以防万一
+    if not first_episode:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="找不到任何一个选中的分集。")
+
+    anime_title = first_episode.source.anime.title
+    provider_name = first_episode.source.providerName
+    offset_str = f"+{request_data.offset}" if request_data.offset >= 0 else str(request_data.offset)
+
+    task_title = f"集数偏移 ({offset_str}): {anime_title} ({provider_name})"
+    task_coro = lambda session, callback: tasks.offset_episodes_task(
+        request_data.episodeIds, request_data.offset, session, callback
+    )
+    
+    unique_key = f"modify-episodes-{first_episode.sourceId}"
+    try:
+        task_id, _ = await task_manager.submit_task(task_coro, task_title, unique_key=unique_key)
+    except HTTPException as e:
+        # 重新抛出由 task_manager 引发的异常 (例如，任务已在运行)
+        raise e
+
+    logger.info(f"用户 '{current_user.username}' 提交了集数偏移任务 (Task ID: {task_id})。")
+    return {"message": f"集数偏移任务 '{task_title}' 已提交。", "taskId": task_id}
+
 
 @router.delete("/library/episode/{episodeId}", status_code=status.HTTP_202_ACCEPTED, summary="提交删除指定分集的任务", response_model=UITaskResponse)
 async def delete_episode_from_source(
@@ -1824,27 +1882,10 @@ async def incremental_refresh_task(sourceId: int, nextEpisodeIndex: int, session
         logger.error(f"增量刷新源任务 (ID: {sourceId}) 失败: {e}", exc_info=True)
         raise
 
-class ManualImportRequest(models.BaseModel):
-    title: Optional[str] = None
-    episodeIndex: int = Field(..., alias="episodeIndex")
-    url: Optional[str] = None
-    content: Optional[str] = None
-
-    class Config:
-        populate_by_name = True # 允许使用 'episodeIndex' 或 'episode_index'
-
-    @model_validator(mode='after')
-    def check_url_or_content(self):
-        if self.url is None and self.content is None:
-            raise ValueError('必须提供 "url" 或 "content" 字段。')
-        if self.url is not None and self.content is not None:
-            raise ValueError('只能提供 "url" 或 "content" 之一，不能同时提供。')
-        return self
-
 @router.post("/library/source/{source_id}/manual-import", status_code=status.HTTP_202_ACCEPTED, summary="手动导入单个分集弹幕")
 async def manual_import_episode(
     source_id: int,
-    request_data: ManualImportRequest,
+    request_data: models.ManualImportRequest,
     current_user: models.User = Depends(security.get_current_user),
     session: AsyncSession = Depends(get_db_session),
     scraper_manager: ScraperManager = Depends(get_scraper_manager),

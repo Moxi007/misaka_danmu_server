@@ -79,6 +79,32 @@ async def _migrate_add_source_order(conn, db_type, db_name):
 
     logger.info(f"迁移任务 '{migration_id}' 检查完成。")
 
+async def _migrate_add_danmaku_file_path(conn, db_type, db_name):
+    """
+    迁移任务: 确保 episode 表有 danmaku_file_path 字段。
+    这是为了兼容旧版本数据库，在代码更新后自动添加新列。
+    """
+    migration_id = "add_danmaku_file_path_to_episode"
+    logger.info(f"正在检查是否需要执行迁移: {migration_id}...")
+
+    # --- 1. 检查并添加 danmaku_file_path 列 ---
+    if db_type == "mysql":
+        check_column_sql = text(f"SELECT 1 FROM information_schema.columns WHERE table_schema = '{db_name}' AND table_name = 'episode' AND column_name = 'danmaku_file_path'")
+        add_column_sql = text("ALTER TABLE episode ADD COLUMN `danmaku_file_path` VARCHAR(1024) NULL DEFAULT NULL")
+    elif db_type == "postgresql":
+        check_column_sql = text("SELECT 1 FROM information_schema.columns WHERE table_name = 'episode' AND column_name = 'danmaku_file_path'")
+        add_column_sql = text('ALTER TABLE episode ADD COLUMN "danmaku_file_path" VARCHAR(1024) NULL DEFAULT NULL')
+    else:
+        return
+
+    column_exists = (await conn.execute(check_column_sql)).scalar_one_or_none() is not None
+    if not column_exists:
+        logger.info("列 'episode.danmaku_file_path' 不存在。正在添加...")
+        await conn.execute(add_column_sql)
+        logger.info("成功添加列 'episode.danmaku_file_path'。")
+    
+    logger.info(f"迁移任务 '{migration_id}' 检查完成。")
+
 
 async def _run_migrations(conn):
     """
@@ -92,6 +118,7 @@ async def _run_migrations(conn):
         return
 
     await _migrate_add_source_order(conn, db_type, db_name)
+    await _migrate_add_danmaku_file_path(conn, db_type, db_name)
 
 def _log_db_connection_error(context_message: str, e: Exception):
     """Logs a standardized, detailed error message for database connection failures."""

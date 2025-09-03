@@ -23,6 +23,7 @@ scraper_responses_logger = logging.getLogger("scraper_responses")
 class TencentCommentContentStyle(BaseModel):
     color: Optional[str] = None
     position: Optional[int] = None
+    gradient_colors: Optional[List[str]] = None
 
 class TencentEpisode(BaseModel):
     vid: str = Field(..., description="分集视频ID")
@@ -37,6 +38,18 @@ class TencentComment(BaseModel):
     content: str = Field(..., description="弹幕内容")
     # API 对普通弹幕返回空字符串 ""，对特殊弹幕返回对象。Union可以同时处理这两种情况。
     content_style: Union[TencentCommentContentStyle, str, None] = Field(None)
+
+    @field_validator("content_style", mode="before")
+    @classmethod
+    def _validate_content_style(cls, v: Any) -> Any:
+        """在Pydantic验证前，尝试将JSON字符串解析为字典。"""
+        if isinstance(v, str) and v.startswith('{') and v.endswith('}'):
+            try:
+                return json.loads(v)
+            except json.JSONDecodeError:
+                # 如果解析失败，则返回原始字符串，保持健壮性
+                return v
+        return v
 
 
 # --- 用于搜索API的新模型 ---
@@ -609,8 +622,19 @@ class TencentScraper(BaseScraper):
                 self.logger.warning(f"所有方法均无法解析电影的 vid，将回退使用 cid ({media_id}) 作为 vid。这可能导致弹幕获取失败。")
                 final_episode_id = media_id
 
+            # 改进：尝试获取电影的实际标题，而不是写死为“正片”
+            # 我们已经通过 _get_movie_vid_from_api 获取了所有可能的“正片”分集
+            # 这里我们直接使用第一个分集的标题作为电影标题
+            final_episode_title = "正片" # 默认标题
+            try:
+                episodes_list = await self._fetch_episodes_paginated(media_id, db_media_type)
+                if episodes_list:
+                    final_episode_title = episodes_list[0].title
+            except Exception as e:
+                self.logger.warning(f"为电影 (cid={media_id}) 获取分集标题失败，将使用默认标题'正片': {e}")
+
             return [models.ProviderEpisodeInfo(
-                provider=self.provider_name, episodeId=final_episode_id, title="正片", episodeIndex=1,
+                provider=self.provider_name, episodeId=final_episode_id, title=final_episode_title, episodeIndex=1,
                 url=f"https://v.qq.com/x/cover/{media_id}/{final_episode_id}.html"
             )]
 
@@ -1062,10 +1086,17 @@ class TencentScraper(BaseScraper):
                 elif c.content_style.position == 3:
                     mode = 4  # 底部
                 
-                if c.content_style.color:
+                # 确定颜色：优先使用渐变色中的第一个颜色，如果存在的话
+                target_color_hex = None
+                if c.content_style.gradient_colors and len(c.content_style.gradient_colors) > 0:
+                    target_color_hex = c.content_style.gradient_colors[0]
+                elif c.content_style.color:
+                    target_color_hex = c.content_style.color
+                
+                if target_color_hex:
                     try:
-                        # 修正：腾讯的颜色值是十进制字符串，直接转换为整数
-                        color = int(c.content_style.color)
+                        # 颜色值是十六进制字符串，需要转换为十进制整数
+                        color = int(target_color_hex.lstrip('#'), 16)
                     except (ValueError, TypeError):
                         pass # 转换失败则使用默认白色
             

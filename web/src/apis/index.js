@@ -365,6 +365,10 @@ export const deleteAnimeEpisodeSingle = data =>
 export const resetEpisode = data =>
   api.post(`/api/ui/library/source/${data.sourceId}/reorder-episodes`)
 
+/** 集数偏移 */
+export const offsetEpisodes = data =>
+  api.post('/api/ui/library/episodes/offset', data)
+
 /** 获取弹幕详情 */
 export const getDanmakuDetail = data => api.get(`/api/ui/comment/${data.id}`)
 

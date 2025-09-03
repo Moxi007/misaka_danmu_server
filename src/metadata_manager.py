@@ -288,23 +288,29 @@ class MetadataSourceManager:
 
     async def getProviderConfig(self, providerName: str) -> Dict[str, Any]:
         """
-        获取特定元数据提供商的配置。
+        获取特定提供商（元数据源或搜索源）的配置。
         """
-        if providerName not in self.sources:
-            raise HTTPException(status_code=404, detail=f"未找到元数据源: {providerName}")
 
         # 将提供商名称映射到其在数据库中的配置键
         config_keys_map = {
+            # Metadata Sources
             "tmdb": ["tmdbApiKey", "tmdbApiBaseUrl", "tmdbImageBaseUrl"],
             "bangumi": ["bangumiClientId", "bangumiClientSecret", "bangumiToken"],
             "douban": ["doubanCookie"],
             "tvdb": ["tvdbApiKey"],
-            "imdb": []  # IMDb 目前没有特定配置
+            "imdb": [],  # IMDb 目前没有特定配置
+            # Scrapers
+            "gamer": ["gamerCookie", "gamerUserAgent", "gamerEpisodeBlacklistRegex", "scraperGamerLogResponses"],
         }
 
         keys_to_fetch = config_keys_map.get(providerName)
+
+        # 如果提供商没有特定的配置键，检查它是否是一个已知的提供商
         if keys_to_fetch is None:
-            self.logger.warning(f"提供商 '{providerName}' 已加载，但没有定义的配置键。")
+            is_known_metadata_source = providerName in self.sources
+            is_known_scraper = providerName in self.scraper_manager.scrapers
+            if not is_known_metadata_source and not is_known_scraper:
+                raise HTTPException(status_code=404, detail=f"未找到提供商: {providerName}")
             return {}
 
         config_values = {key: await self._config_manager.get(key, "") for key in keys_to_fetch}
@@ -312,6 +318,11 @@ class MetadataSourceManager:
         # 为单值配置提供特殊处理，以匹配前端期望的格式
         if providerName in ["douban", "tvdb"]:
             return {"value": next(iter(config_values.values()), "")}
+        
+        # 新增：为Gamer也返回单值value，以简化前端处理
+        if providerName == "gamer":
+            # 修正：此前的实现有误，只返回了Cookie。现在返回所有为Gamer获取的配置。
+            return config_values
 
         # 新增：为Bangumi添加 authMode 字段，以明确告知前端当前应显示哪种模式
         if providerName == "bangumi":
@@ -321,6 +332,41 @@ class MetadataSourceManager:
                 config_values["authMode"] = "oauth"
 
         return config_values
+
+    async def updateProviderConfig(self, providerName: str, payload: Dict[str, Any]):
+        """
+        更新特定提供商（元数据源或搜索源）的配置。
+        """
+        # 定义每个提供商允许更新的配置键，以防止任意写入
+        allowed_keys_map = {
+            # Metadata Sources
+            "tmdb": ["tmdbApiKey", "tmdbApiBaseUrl", "tmdbImageBaseUrl"],
+            "bangumi": ["bangumiClientId", "bangumiClientSecret", "bangumiToken"],
+            "douban": ["doubanCookie"],
+            "tvdb": ["tvdbApiKey"],
+            # Scrapers
+            "gamer": ["gamerCookie", "gamerUserAgent", "gamerEpisodeBlacklistRegex", "scraperGamerLogResponses"],
+        }
+
+        allowed_keys = allowed_keys_map.get(providerName)
+        if allowed_keys is None:
+            raise HTTPException(status_code=404, detail=f"提供商 '{providerName}' 不存在或不支持自定义配置。")
+
+        async with self._session_factory() as session:
+            for key, value in payload.items():
+                if key in allowed_keys:
+                    await crud.update_config_value(session, key, str(value if value is not None else ""))
+                else:
+                    self.logger.warning(f"尝试为提供商 '{providerName}' 更新一个不允许的配置项 '{key}'，已忽略。")
+            # 修正：添加 commit() 以确保更改被保存到数据库。
+            await session.commit()
+        
+        # 如果是元数据源的配置更新，重新加载它们以使更改生效
+        if providerName in self.sources:
+            await self.load_and_sync_sources()
+            self.logger.info(f"元数据源 '{providerName}' 的配置已更新并重新加载。")
+
+        return {"message": "配置已成功更新。"}
 
     async def update_tmdb_mappings(self, tmdb_tv_id: int, group_id: str, user: models.User):
         """协调TMDB分集组映射的更新。现在此操作将委托给TMDB源（如果存在且具有该方法）。"""

@@ -3,7 +3,7 @@ import logging
 import traceback
 from enum import Enum
 import time
-from typing import Any, Callable, Coroutine, Dict, List, Tuple, Optional
+from typing import Any, Callable, Coroutine, Dict, List, Tuple, Optional # Add HTTPException, status
 from uuid import uuid4, UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from . import models, crud
 
 logger = logging.getLogger(__name__)
+from fastapi import HTTPException, status
 
 class TaskStatus(str, Enum):
     PENDING = "排队中"
@@ -135,14 +136,23 @@ class TaskManager:
         async with self._lock:
             # 检查是否有同名任务正在排队或运行
             if title in self._pending_titles:
-                raise ValueError(f"任务 '{title}' 已在队列中，请勿重复提交。")
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=f"任务 '{title}' 已在队列中，请勿重复提交。"
+                )
             if self._current_task and self._current_task.title == title:
-                raise ValueError(f"任务 '{title}' 已在运行中，请勿重复提交。")
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=f"任务 '{title}' 已在运行中，请勿重复提交。"
+                )
             
             # 新增：检查唯一键，防止同一资源的多个任务同时进行
             if unique_key:
                 if unique_key in self._active_unique_keys:
-                    raise ValueError(f"一个针对此媒体的导入任务已在队列中或正在运行，请勿重复提交。")
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail=f"一个针对此媒体的导入任务已在队列中或正在运行，请勿重复提交。"
+                    )
                 self._active_unique_keys.add(unique_key)
             self._pending_titles.add(title)
 

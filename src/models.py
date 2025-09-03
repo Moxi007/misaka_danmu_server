@@ -1,7 +1,7 @@
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 # Search 模块模型
 class AnimeInfo(BaseModel):
@@ -189,6 +189,7 @@ class MetadataSourceSettingUpdate(BaseModel):
     providerName: str
     isAuxSearchEnabled: bool
     useProxy: bool
+    isFailoverEnabled: bool
     displayOrder: int
 
 
@@ -311,6 +312,20 @@ class ControlUrlImportRequest(BaseModel):
     url: str
     provider: str
 
+class ManualImportRequest(BaseModel):
+    """用于手动导入单个分集的请求体模型"""
+    title: Optional[str] = None
+    episodeIndex: int
+    # 使用别名 'sourceUrl' 来兼容前端发送的字段
+    url: Optional[str] = Field(None, alias='sourceUrl')
+    content: Optional[str] = None
+
+    @model_validator(mode='after')
+    def check_url_or_content(self) -> "ManualImportRequest":
+        if not self.url and not self.content:
+            raise ValueError('必须提供 "url" 或 "content" 字段。')
+        return self
+
 class DanmakuOutputSettings(BaseModel):
     limit_per_source: int
     aggregation_enabled: bool
@@ -345,6 +360,7 @@ class MetadataSourceStatusResponse(BaseModel):
     displayOrder: int
     status: str
     useProxy: bool
+    isFailoverEnabled: bool
 
 class ScraperSettingWithConfig(ScraperSetting):
     configurableFields: Optional[Dict[str, str]] = None
@@ -361,6 +377,10 @@ class ProxySettingsResponse(BaseModel):
 
 class ReassociationRequest(BaseModel):
     targetAnimeId: int
+
+class EpisodeOffsetRequest(BaseModel):
+    episodeIds: List[int]
+    offset: int
 
 class BulkDeleteEpisodesRequest(BaseModel):
     episodeIds: List[int]
@@ -449,7 +469,7 @@ class EnrichedTMDBEpisodeGroupDetails(TMDBEpisodeGroupDetails):
 
 
 class BatchManualImportItem(BaseModel):
-    episodeTitle: Optional[str] = Field(None, description="分集标题 (可选)")
+    title: Optional[str] = Field(None, description="分集标题 (可选)")
     episodeIndex: int = Field(..., gt=0, description="集数")
     content: str = Field(..., description="URL或XML文件内容")
 
@@ -476,5 +496,3 @@ class RateLimitStatusResponse(BaseModel):
     """流控状态API的完整响应模型"""
     globalEnabled: bool
     providers: List[RateLimitStatusItem]
-
-# --- Rate Limiter Models ---

@@ -264,15 +264,15 @@ async def cleanup_task(app: FastAPI):
 
 
 
-# 包含所有非 dandanplay 的 API 路由
-app.include_router(api_router, prefix="/api")
+
 
 # 新增：显式地挂载外部控制API路由，以确保其优先级
 app.include_router(control_router, prefix="/api/control", tags=["External Control API"])
 
 app.include_router(dandan_router, prefix="/api/v1", tags=["DanDanPlay Compatible"], include_in_schema=False)
 
-
+# 包含所有非 dandanplay 的 API 路由
+app.include_router(api_router, prefix="/api")
 
 # 添加一个运行入口，以便直接从配置启动
 # 这样就可以通过 `python -m src.main` 来运行，并自动使用 config.yml 中的端口和主机

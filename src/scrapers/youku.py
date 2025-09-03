@@ -83,11 +83,16 @@ class YoukuDanmakuData(BaseModel):
 class YoukuDanmakuResult(BaseModel):
     data: YoukuDanmakuData
 
+# 修正：更新模型以正确处理优酷API的成功和错误响应结构
 class YoukuRpcData(BaseModel):
     result: str # This is a JSON string
 
 class YoukuRpcResult(BaseModel):
-    data: YoukuRpcData
+    # 新增：添加 api, ret, v 字段以匹配真实响应
+    api: str
+    data: Optional[YoukuRpcData] = None # data 在出错时可能不存在
+    ret: List[str]
+    v: str
 
 # --- Main Scraper Class ---
 
@@ -97,6 +102,10 @@ class YoukuScraper(BaseScraper):
     referer = "https://v.youku.com"
     _PROVIDER_SPECIFIC_BLACKLIST_DEFAULT = r"^(.*?)(抢先(版|篇)?|加更(版|篇)?|花絮|预告|特辑|彩蛋|专访|幕后(故事|花絮)?|直播|纯享|未播|衍生|番外|会员(专属|加长)?|片花|精华|看点|速览|解读|reaction|影评)(.*?)$"
 
+    # 新增：为令牌过期定义一个自定义异常
+    class TokenExpiredError(Exception):
+        """当检测到优酷弹幕令牌过期时引发。"""
+        pass
     def __init__(self, session_factory: async_sessionmaker[AsyncSession], config_manager: ConfigManager):
         super().__init__(session_factory, config_manager)
         # Regexes from C#
@@ -353,11 +362,11 @@ class YoukuScraper(BaseScraper):
         response.raise_for_status()
         return YoukuVideoResult.model_validate(response.json())
 
-    async def get_comments(self, episode_id: str, progress_callback: Optional[Callable] = None) -> List[dict]:
+    async def get_comments(self, episode_id: str, progress_callback: Optional[Callable] = None) -> Optional[List[dict]]:
         vid = episode_id.replace("_", "=")
         
         try:
-            await self._ensure_token_cookie()
+            await self._ensure_token_cookie() # 首次获取令牌
             
             episode_info_url = f"https://openapi.youku.com/v2/videos/show_basic.json?client_id=53e6cc67237fc59a&package=com.huawei.hwvplayer.youku&video_id={vid}"
             episode_info_resp = await self.client.get(episode_info_url)
@@ -369,29 +378,43 @@ class YoukuScraper(BaseScraper):
 
             if total_mat == 0:
                 self.logger.warning(f"Youku: Video {vid} has duration 0, no danmaku to fetch.")
-                return []
+                return [] # 返回空列表表示成功但无内容
 
             all_comments = []
-            for mat in range(total_mat):
-                if progress_callback:
-                    progress = int((mat + 1) / total_mat * 100) if total_mat > 0 else 100
-                    await progress_callback(progress, f"正在获取分段 {mat + 1}/{total_mat}")
+            # 修正：使用 while 循环以支持重试
+            mat = 0
+            while mat < total_mat:
+                try:
+                    if progress_callback:
+                        progress = int((mat + 1) / total_mat * 100) if total_mat > 0 else 100
+                        await progress_callback(progress, f"正在获取分段 {mat + 1}/{total_mat}")
 
-                comments_in_mat = await self._get_danmu_content_by_mat(vid, mat)
-                if comments_in_mat:
-                    all_comments.extend(comments_in_mat)
-                await asyncio.sleep(0.2)
+                    comments_in_mat = await self._get_danmu_content_by_mat(vid, mat)
+                    if comments_in_mat:
+                        all_comments.extend(comments_in_mat)
+                    
+                    mat += 1 # 成功，处理下一段
+                    await asyncio.sleep(0.2)
+                except self.TokenExpiredError:
+                    self.logger.warning(f"Youku: 令牌已过期，正在强制刷新并重试分段 {mat + 1}...")
+                    await self._ensure_token_cookie(force_refresh=True)
+                    # 不增加 mat，以便重试当前分段
+                    continue
 
             if progress_callback:
                 await progress_callback(100, "弹幕整合完成")
 
             return self._format_comments(all_comments)
 
+        except self.TokenExpiredError:
+            # 如果在循环外（例如第一次请求就失败且无法恢复）捕获到，则任务失败
+            self.logger.error(f"Youku: 无法获取有效令牌，任务失败 (vid: {vid})")
+            return None
         except Exception as e:
             self.logger.error(f"Youku: Failed to get danmaku for vid {vid}: {e}", exc_info=True)
-            return []
+            return None # 返回 None 表示获取失败
 
-    async def _ensure_token_cookie(self):
+    async def _ensure_token_cookie(self, force_refresh: bool = False):
         """
         确保获取弹幕签名所需的 cna 和 _m_h5_tk cookie。
         此逻辑严格参考了 C# 代码，并针对网络环境进行了优化。
@@ -399,9 +422,10 @@ class YoukuScraper(BaseScraper):
         # 步骤 1: 获取 'cna' cookie。它通常由优酷主站或其统计服务设置。
         # 我们优先访问主站，因为它更不容易出网络问题。
         cna_val = self.client.cookies.get("cna")
-        if not cna_val:
+        if not cna_val or force_refresh:
             try:
-                self.logger.debug("Youku: 'cna' cookie 未找到, 正在访问 youku.com 以获取...")
+                log_msg = "强制刷新 'cna' cookie..." if force_refresh else "'cna' cookie 未找到, 正在访问 youku.com 以获取..."
+                self.logger.debug(f"Youku: {log_msg}")
                 await self.client.get("https://www.youku.com/")
                 cna_val = self.client.cookies.get("cna")
             except httpx.ConnectError as e:
@@ -410,17 +434,21 @@ class YoukuScraper(BaseScraper):
 
         # 步骤 2: 获取 '_m_h5_tk' 令牌, 此请求可能依赖于 'cna' cookie 的存在。
         token_val = self.client.cookies.get("_m_h5_tk")
-        if not token_val:
+        if not token_val or force_refresh:
             try:
-                self.logger.debug("Youku: '_m_h5_tk' cookie 未找到, 正在从 acs.youku.com 请求...")
+                log_msg = "强制刷新 '_m_h5_tk' cookie..." if force_refresh else "'_m_h5_tk' cookie 未找到, 正在从 acs.youku.com 请求..."
+                self.logger.debug(f"Youku: {log_msg}")
                 await self.client.get("https://acs.youku.com/h5/mtop.com.youku.aplatform.weakget/1.0/?jsv=2.5.1&appKey=24679788")
                 token_val = self.client.cookies.get("_m_h5_tk")
             except httpx.ConnectError as e:
                 self.logger.error(f"Youku: 无法连接到 acs.youku.com 获取令牌 cookie。弹幕获取很可能会失败。错误: {e}")
         
         self._token = token_val.split("_")[0] if token_val else ""
-        if not self._token:
+        if self._token:
+            self.logger.info("Youku: 已成功获取/确认弹幕签名令牌。")
+        else:
             self.logger.warning("Youku: 未能获取到弹幕签名所需的 token cookie (_m_h5_tk)，弹幕获取可能会失败。")
+            raise self.TokenExpiredError("无法获取有效的 _m_h5_tk 令牌。")
 
     def _generate_msg_sign(self, msg_enc: str) -> str:
         s = msg_enc + "MkmC9SoIw6xCkSKHhJ7b5D2r51kBiREr"
@@ -430,7 +458,7 @@ class YoukuScraper(BaseScraper):
         s = "&".join([self._token, t, app_key, data])
         return hashlib.md5(s.encode('utf-8')).hexdigest().lower()
 
-    async def _get_danmu_content_by_mat(self, vid: str, mat: int) -> List[YoukuComment]:
+    async def _get_danmu_content_by_mat(self, vid: str, mat: int) -> Optional[List[YoukuComment]]:
         if not self._token:
             self.logger.error("Youku: Cannot get danmaku, _m_h5_tk is missing.")
             return []
@@ -476,13 +504,22 @@ class YoukuScraper(BaseScraper):
         response.raise_for_status()
 
         # 修正：优酷API现在直接返回JSON，而不是JSONP。
-        # 我们需要解析两层JSON，因为内层的'result'是一个字符串化的JSON。
         try:
             rpc_result = YoukuRpcResult.model_validate(response.json())
         except (json.JSONDecodeError, ValidationError) as e:
             self.logger.error(f"Youku: 解析外层弹幕响应失败: {e} - 响应: {response.text[:200]}")
-            return []
+            return None
 
+        # 新增：检查API返回的错误信息
+        if "SUCCESS" not in rpc_result.ret[0]:
+            error_msg = rpc_result.ret[0]
+            self.logger.warning(f"Youku API 错误 (vid={vid}, mat={mat}): {error_msg}")
+            if "TOKEN_EXOIRED" in error_msg: # 优酷API拼写错误
+                raise self.TokenExpiredError()
+            # 对于其他错误，例如 "ILLEGAL_ACCESS"，我们返回 None 表示此分段失败
+            return None
+
+        # 只有在成功时才解析内层JSON
         if rpc_result.data and rpc_result.data.result:
             try:
                 comment_result = YoukuDanmakuResult.model_validate(json.loads(rpc_result.data.result))
@@ -490,8 +527,7 @@ class YoukuScraper(BaseScraper):
                     return comment_result.data.result
             except (json.JSONDecodeError, ValidationError) as e:
                 self.logger.error(f"Youku: 解析内层弹幕结果字符串失败: {e}")
-
-        return []
+        return None
 
     def _format_comments(self, comments: List[YoukuComment]) -> List[dict]:
         if not comments:
