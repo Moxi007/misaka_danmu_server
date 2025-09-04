@@ -3,7 +3,7 @@ import importlib
 import pkgutil
 import inspect
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Type
 from uuid import uuid4
@@ -16,6 +16,7 @@ from apscheduler.triggers.cron import CronTrigger
 from . import crud
 from .rate_limiter import RateLimiter
 from .jobs.base import BaseJob
+from .timezone import get_app_timezone
 from .task_manager import TaskManager
 from .scraper_manager import ScraperManager
 from .metadata_manager import MetadataSourceManager
@@ -54,7 +55,7 @@ class SchedulerManager:
         self.scraper_manager = scraper_manager
         self.rate_limiter = rate_limiter
         self.metadata_manager = metadata_manager
-        self.scheduler = AsyncIOScheduler(timezone="Asia/Shanghai")
+        self.scheduler = AsyncIOScheduler(timezone=str(get_app_timezone()))
         self._job_classes: Dict[str, Type[BaseJob]] = {}
 
     def _load_jobs(self):

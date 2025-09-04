@@ -7,9 +7,41 @@ from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sess
 from sqlalchemy import text
 from .config import settings
 from .orm_models import Base
-
+from .timezone import get_app_timezone, get_timezone_offset_str
 # 使用模块级日志记录器
 logger = logging.getLogger(__name__)
+
+def _get_db_url(include_db_name: bool = True, for_server: bool = False) -> URL:
+    """
+    根据配置生成数据库连接URL。
+    :param include_db_name: URL中是否包含数据库名称。
+    :param for_server: 是否为连接到服务器（而不是特定数据库）生成URL，主要用于PostgreSQL。
+    """
+    db_type = settings.database.type.lower()
+    
+    if db_type == "mysql":
+        drivername = "mysql+aiomysql"
+        query = {"charset": "utf8mb4"}
+        database = settings.database.name if include_db_name else None
+    elif db_type == "postgresql":
+        drivername = "postgresql+asyncpg"
+        query = None
+        if for_server:
+            database = "postgres"
+        else:
+            database = settings.database.name if include_db_name else None
+    else:
+        raise ValueError(f"不支持的数据库类型: '{db_type}'。请使用 'mysql' 或 'postgresql'。")
+
+    return URL.create(
+        drivername=drivername,
+        username=settings.database.user,
+        password=settings.database.password,
+        host=settings.database.host,
+        port=settings.database.port,
+        database=database,
+        query=query,
+    )
 
 async def _migrate_add_source_order(conn, db_type, db_name):
     """
@@ -105,6 +137,110 @@ async def _migrate_add_danmaku_file_path(conn, db_type, db_name):
     
     logger.info(f"迁移任务 '{migration_id}' 检查完成。")
 
+async def _migrate_cache_value_to_mediumtext(conn, db_type, db_name):
+    """
+    迁移任务: 确保 cache_data.cache_value 列有足够大的容量 (MEDIUMTEXT)。
+    """
+    migration_id = "migrate_cache_value_to_mediumtext"
+    logger.info(f"正在检查是否需要执行迁移: {migration_id}...")
+
+    if db_type == "mysql":
+        # 检查列是否存在且类型不是MEDIUMTEXT
+        check_sql = text(
+            "SELECT DATA_TYPE FROM information_schema.columns "
+            f"WHERE table_schema = '{db_name}' AND table_name = 'cache_data' AND column_name = 'cache_value'"
+        )
+        result = await conn.execute(check_sql)
+        current_type = result.scalar_one_or_none()
+
+        if current_type and current_type.lower() != 'mediumtext':
+            logger.info(f"列 'cache_data.cache_value' 类型为 '{current_type}'，正在修改为 MEDIUMTEXT...")
+            alter_sql = text("ALTER TABLE cache_data MODIFY COLUMN `cache_value` MEDIUMTEXT")
+            await conn.execute(alter_sql)
+            logger.info("成功将 'cache_data.cache_value' 列类型修改为 MEDIUMTEXT。")
+        else:
+            logger.info("列 'cache_data.cache_value' 类型已是 MEDIUMTEXT 或不存在，跳过迁移。")
+    elif db_type == "postgresql":
+        logger.info("PostgreSQL 的 TEXT 类型已支持大容量数据，无需为 cache_value 列执行迁移。")
+    
+    logger.info(f"迁移任务 '{migration_id}' 检查完成。")
+
+async def _migrate_add_source_url_to_episode(conn, db_type, db_name):
+    """
+    迁移任务: 确保 episode 表有 source_url 字段，并处理旧的命名。
+    - 如果存在旧的 'sourceUrl' 列，则将其重命名为 'source_url'。
+    - 如果两者都不存在，则添加新的 'source_url' 列。
+    """
+    migration_id = "add_or_rename_source_url_in_episode"
+    logger.info(f"正在检查是否需要执行迁移: {migration_id}...")
+
+    old_column_name = "sourceUrl"
+    new_column_name = "source_url"
+    table_name = "episode"
+
+    if db_type == "mysql":
+        check_old_column_sql = text(f"SELECT 1 FROM information_schema.columns WHERE table_schema = '{db_name}' AND table_name = '{table_name}' AND column_name = '{old_column_name}'")
+        check_new_column_sql = text(f"SELECT 1 FROM information_schema.columns WHERE table_schema = '{db_name}' AND table_name = '{table_name}' AND column_name = '{new_column_name}'")
+        rename_column_sql = text(f"ALTER TABLE `{table_name}` CHANGE COLUMN `{old_column_name}` `{new_column_name}` TEXT NULL")
+        add_column_sql = text(f"ALTER TABLE `{table_name}` ADD COLUMN `{new_column_name}` TEXT NULL")
+    elif db_type == "postgresql":
+        check_old_column_sql = text(f"SELECT 1 FROM information_schema.columns WHERE table_name = '{table_name}' AND column_name = '{old_column_name}'")
+        check_new_column_sql = text(f"SELECT 1 FROM information_schema.columns WHERE table_name = '{table_name}' AND column_name = '{new_column_name}'")
+        rename_column_sql = text(f'ALTER TABLE "{table_name}" RENAME COLUMN "{old_column_name}" TO "{new_column_name}"')
+        add_column_sql = text(f'ALTER TABLE "{table_name}" ADD COLUMN "{new_column_name}" TEXT NULL')
+    else:
+        return
+
+    old_col_exists = (await conn.execute(check_old_column_sql)).scalar_one_or_none() is not None
+    new_col_exists = (await conn.execute(check_new_column_sql)).scalar_one_or_none() is not None
+
+    if old_col_exists and not new_col_exists:
+        logger.info(f"在表 '{table_name}' 中发现旧列 '{old_column_name}'，正在重命名为 '{new_column_name}'...")
+        await conn.execute(rename_column_sql)
+        logger.info(f"成功重命名表 '{table_name}' 中的列。")
+    elif not old_col_exists and not new_col_exists:
+        logger.info(f"列 '{table_name}.{new_column_name}' 不存在。正在添加...")
+        await conn.execute(add_column_sql)
+        logger.info(f"成功添加列 '{table_name}.{new_column_name}'。")
+    elif new_col_exists:
+        logger.info(f"列 '{table_name}.{new_column_name}' 已存在，跳过迁移。")
+    
+    logger.info(f"迁移任务 '{migration_id}' 检查完成。")
+
+async def _migrate_text_to_mediumtext(conn, db_type, db_name):
+    """
+    迁移任务: 将多个表中可能存在的 TEXT 字段修改为 MEDIUMTEXT (仅MySQL)。
+    这是为了确保在旧版本上创建的表有足够大的容量。
+    """
+    migration_id = "migrate_text_to_mediumtext"
+    logger.info(f"正在检查是否需要执行迁移: {migration_id}...")
+
+    if db_type != "mysql":
+        logger.info("非MySQL数据库，跳过 TEXT 到 MEDIUMTEXT 的迁移。")
+        return
+
+    tables_and_columns = {
+        "cache_data": "cache_value",
+        "config": "config_value",
+        "task_history": "description",
+        "external_api_logs": "message"
+    }
+
+    for table, column in tables_and_columns.items():
+        check_sql = text(
+            "SELECT DATA_TYPE FROM information_schema.columns "
+            f"WHERE table_schema = '{db_name}' AND table_name = '{table}' AND column_name = '{column}'"
+        )
+        result = await conn.execute(check_sql)
+        current_type = result.scalar_one_or_none()
+
+        if current_type and current_type.lower() == 'text':
+            logger.info(f"列 '{table}.{column}' 类型为 TEXT，正在修改为 MEDIUMTEXT...")
+            alter_sql = text(f"ALTER TABLE {table} MODIFY COLUMN `{column}` MEDIUMTEXT")
+            await conn.execute(alter_sql)
+            logger.info(f"成功将 '{table}.{column}' 列类型修改为 MEDIUMTEXT。")
+
+    logger.info(f"迁移任务 '{migration_id}' 检查完成。")
 
 async def _run_migrations(conn):
     """
@@ -119,6 +255,9 @@ async def _run_migrations(conn):
 
     await _migrate_add_source_order(conn, db_type, db_name)
     await _migrate_add_danmaku_file_path(conn, db_type, db_name)
+    await _migrate_cache_value_to_mediumtext(conn, db_type, db_name)
+    await _migrate_text_to_mediumtext(conn, db_type, db_name)
+    await _migrate_add_source_url_to_episode(conn, db_type, db_name)
 
 def _log_db_connection_error(context_message: str, e: Exception):
     """Logs a standardized, detailed error message for database connection failures."""
@@ -139,37 +278,19 @@ def _log_db_connection_error(context_message: str, e: Exception):
 
 async def create_db_engine_and_session(app: FastAPI):
     """创建数据库引擎和会话工厂，并存储在 app.state 中"""
-    db_type = settings.database.type.lower()
-    if db_type == "mysql":
-        db_url = URL.create(
-            drivername="mysql+aiomysql",
-            username=settings.database.user,
-            password=settings.database.password,
-            host=settings.database.host,
-            port=settings.database.port,
-            database=settings.database.name,
-            query={"charset": "utf8mb4"},
-        )
-    elif db_type == "postgresql":
-        db_url = URL.create(
-            drivername="postgresql+asyncpg",
-            username=settings.database.user,
-            password=settings.database.password,
-            host=settings.database.host,
-            port=settings.database.port,
-            database=settings.database.name,
-        )
-    else:
-        raise ValueError(f"不支持的数据库类型: '{db_type}'。请使用 'mysql' 或 'postgresql'。")
     try:
-        engine = create_async_engine(
-            db_url,
-            echo=False,
-            pool_recycle=3600,
-            pool_size=10,
-            max_overflow=20,
-            pool_timeout=30
-        )
+        db_url = _get_db_url()
+        db_type = settings.database.type.lower()
+        engine_args = {
+            "echo": False,
+            "pool_recycle": 3600,
+            "pool_size": 10,
+            "max_overflow": 20,
+            "pool_timeout": 30
+        }
+        # 移除时区设置，让数据库使用其默认时区
+
+        engine = create_async_engine(db_url, **engine_args)
         app.state.db_engine = engine
         app.state.db_session_factory = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
         logger.info("数据库引擎和会话工厂创建成功。")
@@ -184,27 +305,12 @@ async def _create_db_if_not_exists():
     db_name = settings.database.name
 
     if db_type == "mysql":
-        # 创建一个不带数据库名称的连接URL
-        server_url = URL.create(
-            drivername="mysql+aiomysql",
-            username=settings.database.user,
-            password=settings.database.password,
-            host=settings.database.host,
-            port=settings.database.port,
-            query={"charset": "utf8mb4"},
-        )
+        server_url = _get_db_url(include_db_name=False)
         check_sql = text(f"SHOW DATABASES LIKE '{db_name}'")
         create_sql = text(f"CREATE DATABASE `{db_name}` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci")
     elif db_type == "postgresql":
         # 对于PostgreSQL，连接到默认的 'postgres' 数据库来执行创建操作
-        server_url = URL.create(
-            drivername="postgresql+asyncpg",
-            username=settings.database.user,
-            password=settings.database.password,
-            host=settings.database.host,
-            port=settings.database.port,
-            database="postgres",
-        )
+        server_url = _get_db_url(for_server=True)
         check_sql = text(f"SELECT 1 FROM pg_database WHERE datname = '{db_name}'")
         create_sql = text(f'CREATE DATABASE "{db_name}"')
     else:
@@ -212,8 +318,13 @@ async def _create_db_if_not_exists():
         return
 
     # 设置隔离级别以允许 DDL 语句
-    engine = create_async_engine(server_url, echo=False, isolation_level="AUTOCOMMIT")
-    
+    engine_args = {
+        "echo": False,
+        "isolation_level": "AUTOCOMMIT"
+    }
+    # 移除时区设置
+
+    engine = create_async_engine(server_url, **engine_args)
     try:
         async with engine.connect() as conn:
             # 检查数据库是否存在

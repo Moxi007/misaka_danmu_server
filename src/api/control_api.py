@@ -127,6 +127,11 @@ class ControlTaskResponse(BaseModel):
     message: str
     taskId: str
 
+class ExecutionTaskResponse(BaseModel):
+    """用于返回执行任务ID的响应模型"""
+    schedulerTaskId: str
+    executionTaskId: Optional[str] = None
+
 class ControlSearchResultItem(models.ProviderSearchInfo):
     resultIndex: int = Field(..., alias="result_index", description="结果在列表中的顺序索引，从0开始")
 
@@ -1033,6 +1038,21 @@ async def resume_task(taskId: str, task_manager: TaskManager = Depends(get_task_
     if not await task_manager.resume_task(taskId):
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="恢复任务失败，可能任务未被暂停。")
     return {"message": "任务已恢复。"}
+
+@router.get("/tasks/{taskId}/execution", response_model=ExecutionTaskResponse, summary="获取调度任务触发的执行任务ID")
+async def get_execution_task_id(
+    taskId: str,
+    session: AsyncSession = Depends(get_db_session)
+):
+    """
+    在调用 `/import/auto` 等接口后，使用返回的调度任务ID来查询其触发的、
+    真正执行下载导入工作的任务ID。
+    如果调度任务尚未完成或未成功触发执行任务，`executionTaskId` 将为 `null`。
+    您可以轮询此接口，直到获取到 `executionTaskId`。
+    """
+    execution_id = await crud.get_execution_task_id_from_scheduler_task(session, taskId)
+    return ExecutionTaskResponse(schedulerTaskId=taskId, executionTaskId=execution_id)
+
 
 # --- 定时任务管理 ---
 

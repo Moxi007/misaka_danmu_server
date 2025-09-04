@@ -171,9 +171,10 @@ class MetadataSourceManager:
             full_status_list.append({
                 "providerName": provider_name,
                 "isAuxSearchEnabled": setting.get('isAuxSearchEnabled', False),
+                "isFailoverEnabled": setting.get('isFailoverEnabled', False),
                 "displayOrder": setting.get('displayOrder', 99),
                 "status": status_text,
-                "useProxy": setting.get('useProxy', False)
+                "useProxy": setting.get('useProxy', False),
             })
         
         return sorted(full_status_list, key=lambda x: x['displayOrder'])

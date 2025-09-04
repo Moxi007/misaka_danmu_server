@@ -14,21 +14,21 @@ from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, Asyn
 # 现在可以安全地从 src 导入
 from src import crud, security
 from src.config import settings
+from src.database import _get_db_url
+from src.timezone import get_app_timezone, get_timezone_offset_str
 
 async def reset_password(username: str):
     """
     为指定用户重置密码。
     """
     # 1. 设置数据库连接 (与 main.py 类似，但更简化)
-    db_type = settings.database.type.lower()
-    if db_type == "mysql":
-        db_url = f"mysql+aiomysql://{settings.database.user}:{settings.database.password}@{settings.database.host}:{settings.database.port}/{settings.database.name}?charset=utf8mb4"
-    elif db_type == "postgresql":
-        db_url = f"postgresql+asyncpg://{settings.database.user}:{settings.database.password}@{settings.database.host}:{settings.database.port}/{settings.database.name}"
-    else:
-        print(f"❌ 不支持的数据库类型: '{db_type}'。请使用 'mysql' 或 'postgresql'。")
+    try:
+        db_url = _get_db_url()
+    except ValueError as e:
+        print(f"❌ {e}")
         return
 
+    # 关键修复：不设置连接时区，确保所有操作都使用 naive datetime
     engine = create_async_engine(db_url)
     session_factory = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
 

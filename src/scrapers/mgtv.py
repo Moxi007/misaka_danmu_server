@@ -243,6 +243,25 @@ class MgtvScraper(BaseScraper):
         self.logger.info(f"MGTV: 为 S{search_season} 过滤后，剩下 {len(final_results)} 个结果。")
         return final_results
 
+    async def _get_episode_count(self, media_id: str) -> Optional[int]:
+        """Helper to fetch only the episode count for a given media_id."""
+        try:
+            # Use a small size to minimize data transfer, as we only need the 'total' count.
+            url = f"https://pcweb.api.mgtv.com/variety/showlist?collection_id={media_id}&page=1&size=1&_support=10000000"
+            response = await self._request_with_rate_limit("GET", url)
+            if await self._should_log_responses():
+                scraper_responses_logger.debug(f"MGTV Episode Count Response (media_id={media_id}): {response.text}")
+            response.raise_for_status()
+            data = response.json()
+            if data.get("code") == 200 and data.get("data"):
+                total = data["data"].get("total")
+                if total is not None:
+                    self.logger.info(f"MGTV: 成功获取 media_id={media_id} 的总集数: {total}")
+                    return int(total)
+        except Exception as e:
+            self.logger.warning(f"MGTV: 获取 media_id={media_id} 的总集数失败: {e}")
+        return None
+
     async def _perform_network_search(self, keyword: str, episode_info: Optional[Dict[str, Any]] = None) -> List[models.ProviderSearchInfo]:
         """Performs the actual network search for Mgtv."""
         self.logger.info(f"MGTV: 正在为 '{keyword}' 执行网络搜索...")
@@ -274,6 +293,9 @@ class MgtvScraper(BaseScraper):
                             
                             media_type = "movie" if item.type_name == "电影" else "tv_series"
                             
+                            # For movies, episode count is always 1. For TV, it will be fetched later.
+                            episode_count = 1 if media_type == "movie" else None
+
                             provider_search_info = models.ProviderSearchInfo(
                                 provider=self.provider_name,
                                 mediaId=item.id,
@@ -282,8 +304,7 @@ class MgtvScraper(BaseScraper):
                                 season=get_season_from_title(item.title),
                                 year=item.year,
                                 imageUrl=item.img,
-                                # 搜索结果中不包含总集数，设为None
-                                episodeCount=None,
+                                episodeCount=episode_count,
                                 currentEpisodeIndex=episode_info.get("episode") if episode_info else None
                             )
                             results.append(provider_search_info)
@@ -291,9 +312,22 @@ class MgtvScraper(BaseScraper):
                             # 安全地跳过不符合我们期望结构的项目（如广告、按钮等）
                             self.logger.debug(f"MGTV: 跳过一个不符合预期的搜索结果项: {item_dict}")
                             continue            
+            
+            # Concurrently fetch episode counts for TV series
+            async def fetch_and_set_count(p_info: models.ProviderSearchInfo):
+                if p_info.type == "tv_series" and p_info.mediaId:
+                    count = await self._get_episode_count(p_info.mediaId)
+                    if count is not None:
+                        p_info.episodeCount = count
+            
+            tasks = [fetch_and_set_count(res) for res in results if res.type == 'tv_series']
+            if tasks:
+                self.logger.info(f"MGTV: 正在为 {len(tasks)} 个电视剧/动漫结果并发获取总集数...")
+                await asyncio.gather(*tasks)
+
             self.logger.info(f"MGTV: 网络搜索 '{keyword}' 完成，找到 {len(results)} 个结果。")
             if results:
-                log_results = "\n".join([f"  - {r.title} (ID: {r.mediaId}, 类型: {r.type}, 年份: {r.year or 'N/A'})" for r in results])
+                log_results = "\n".join([f"  - {r.title} (ID: {r.mediaId}, 类型: {r.type}, 年份: {r.year or 'N/A'}, 集数: {r.episodeCount or 'N/A'})" for r in results])
                 self.logger.info(f"MGTV: 搜索结果列表:\n{log_results}")
             return results
         except (httpx.TimeoutException, httpx.ConnectError) as e:
@@ -344,6 +378,47 @@ class MgtvScraper(BaseScraper):
 
     async def get_episodes(self, media_id: str, target_episode_index: Optional[int] = None, db_media_type: Optional[str] = None) -> List[models.ProviderEpisodeInfo]:
         self.logger.info(f"MGTV: 正在为 media_id={media_id} 获取分集列表...")
+
+        # --- 新增：电影类型的专门处理逻辑 ---
+        if db_media_type == 'movie':
+            self.logger.info(f"MGTV: 检测到媒体类型为电影 (media_id={media_id})，将获取正片。")
+            url = f"https://pcweb.api.mgtv.com/variety/showlist?allowedRC=1&collection_id={media_id}&month=&page=1&_support=10000000"
+            try:
+                response = await self._request_with_rate_limit("GET", url)
+                if await self._should_log_responses():
+                    scraper_responses_logger.debug(f"MGTV Movie Episodes Response (media_id={media_id}): {response.text}")
+                response.raise_for_status()
+                result = MgtvEpisodeListResult.model_validate(response.json())
+
+                if result.data and result.data.list:
+                    # 智能地寻找正片：
+                    # 1. 优先寻找 `isIntact` 为 "1" 的条目，这通常是正片。
+                    main_feature = next((ep for ep in result.data.list if ep.isIntact == "1"), None)
+                    
+                    # 2. 如果找不到，则回退到寻找第一个不是预告片 (`isnew` 不为 "2") 的条目。
+                    if not main_feature:
+                        main_feature = next((ep for ep in result.data.list if ep.isnew != "2"), None)
+
+                    # 3. 如果还是找不到，作为最后的备用方案，直接使用列表中的第一个条目。
+                    if not main_feature:
+                        main_feature = result.data.list[0] if result.data.list else None
+
+                    if main_feature:
+                        # 电影的真实标题通常在 t3 字段，t1 是描述。
+                        title = main_feature.title3 or main_feature.title or "正片"
+                        return [
+                            models.ProviderEpisodeInfo(
+                                provider=self.provider_name,
+                                episodeId=f"{media_id},{main_feature.video_id}",
+                                title=title,
+                                episodeIndex=1, # 电影总是第1集
+                                url=f"https://www.mgtv.com/b/{media_id}/{main_feature.video_id}.html"
+                            )
+                        ]
+            except Exception as e:
+                self.logger.error(f"MGTV: 获取电影分集失败 (media_id={media_id}): {e}", exc_info=True)
+                return []
+        # --- 电影处理逻辑结束 ---
         
         all_episodes: List[MgtvEpisode] = []
         month = ""

@@ -4,7 +4,7 @@ import json
 import re
 from typing import List, Optional, Dict, Any
 from typing import Callable
-from datetime import datetime
+from datetime import datetime, timezone
 from opencc import OpenCC
 from thefuzz import fuzz
 
@@ -17,6 +17,7 @@ from fastapi.routing import APIRoute
 
 from . import crud, models, orm_models
 from .config_manager import ConfigManager
+from .timezone import get_now, get_app_timezone
 from .database import get_db_session
 from .utils import parse_search_keyword
 from .scraper_manager import ScraperManager
@@ -386,7 +387,12 @@ async def get_token_from_path(
         # 尝试记录失败的访问
         token_record = await crud.get_api_token_by_token_str(session, token)
         if token_record:
-            is_expired = token_record.get('expiresAt') and token_record['expiresAt'].replace(tzinfo=timezone.utc) < datetime.now(timezone.utc)
+            expires_at = token_record.get('expiresAt')
+            is_expired = False
+            if expires_at:
+                if expires_at.tzinfo is None:
+                    expires_at = expires_at.replace(tzinfo=get_app_timezone())
+                is_expired = expires_at < get_now()
             status_to_log = 'denied_expired' if is_expired else 'denied_disabled'
             await crud.create_token_access_log(session, token_record['id'], request.client.host, request.headers.get("user-agent"), log_status=status_to_log, path=log_path)
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid API token")
@@ -466,7 +472,11 @@ async def search_anime_for_dandan(
         dandan_type = DANDAN_TYPE_MAPPING.get(res.get('type'), "other")
         dandan_type_desc = DANDAN_TYPE_DESC_MAPPING.get(res.get('type'), "其他")
         year = res.get('year')
-        start_date_str = f"{year}-01-01T00:00:00Z" if year else (res.get('startDate').isoformat() if res.get('startDate') else None)
+        start_date_str = None
+        if year:
+            start_date_str = datetime(year, 1, 1, tzinfo=get_app_timezone()).isoformat()
+        elif res.get('startDate'):
+            start_date_str = res.get('startDate').isoformat()
 
         animes.append(DandanSearchAnimeItem(
             animeId=res['animeId'],

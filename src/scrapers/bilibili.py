@@ -7,8 +7,7 @@ import html
 import json
 from urllib.parse import urlencode
 from typing import Any, Callable, Dict, List, Optional, Union
-
-from datetime import datetime
+from datetime import datetime, timezone
 from collections import defaultdict
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from ..utils import parse_search_keyword

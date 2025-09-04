@@ -2,7 +2,7 @@ import asyncio
 import logging
 import re
 import secrets
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional, Set
 from urllib.parse import urlencode
 
@@ -18,6 +18,7 @@ from ..config import settings
 from ..config_manager import ConfigManager
 from ..database import get_db_session
 from ..utils import parse_search_keyword
+from ..timezone import get_app_timezone, get_now
 from ..scraper_manager import ScraperManager
 from .base import BaseMetadataSource
 
@@ -89,7 +90,7 @@ class BangumiSearchSubject(BaseModel):
     def details_string(self) -> str:
         parts = []
         if self.date:
-            try: parts.append(datetime.fromisoformat(self.date).strftime('%Y年%m月%d日'))
+            try: parts.append(date.fromisoformat(self.date).strftime('%Y年%m月%d日'))
             except (ValueError, TypeError): parts.append(self.date)
 
         if self.infobox:
@@ -119,8 +120,14 @@ async def _get_bangumi_auth(session: AsyncSession, user_id: int) -> Dict[str, An
     if not auth:
         return {"isAuthenticated": False}
     
-    if auth.expiresAt and auth.expiresAt.replace(tzinfo=None) < datetime.utcnow():
-        return {"isAuthenticated": False, "isExpired": True}
+    if auth.expiresAt:
+        expires_at = auth.expiresAt
+        # Fallback for DBs that don't store timezone info (like SQLite)
+        if expires_at.tzinfo is None:
+            # Assume the naive datetime is in the app's configured timezone
+            expires_at = expires_at.replace(tzinfo=get_app_timezone())
+        if expires_at < get_now():
+         return {"isAuthenticated": False, "isExpired": True}
 
     return {
         "isAuthenticated": True, "bangumiUserId": auth.bangumiUserId,
@@ -136,9 +143,9 @@ async def _save_bangumi_auth(session: AsyncSession, user_id: int, auth_data: Dic
     if existing_auth:
         for key, value in auth_data.items():
             setattr(existing_auth, key, value)
-        existing_auth.authorizedAt = datetime.utcnow()
+        existing_auth.authorizedAt = get_now()
     else:
-        new_auth = orm_models.BangumiAuth(userId=user_id, **auth_data, authorizedAt=datetime.utcnow())
+        new_auth = orm_models.BangumiAuth(userId=user_id, **auth_data, authorizedAt=get_now())
         session.add(new_auth)
     await session.flush()
 
@@ -183,7 +190,14 @@ async def bangumi_auth_callback(request: Request, code: str = Query(...), state:
         if avatar_url and avatar_url.startswith("//"):
             avatar_url = "https:" + avatar_url
 
-        auth_to_save = {"bangumiUserId": user_info.get("id"), "nickname": user_info.get("nickname"), "avatarUrl": avatar_url, "accessToken": token_data.get("access_token"), "refreshToken": token_data.get("refresh_token"), "expiresAt": datetime.utcnow() + timedelta(seconds=token_data.get("expires_in", 0))}
+        auth_to_save = {
+            "bangumiUserId": user_info.get("id"),
+            "nickname": user_info.get("nickname"),
+            "avatarUrl": avatar_url,
+            "accessToken": token_data.get("access_token"),
+            "refreshToken": token_data.get("refresh_token"),
+            "expiresAt": get_now() + timedelta(seconds=token_data.get("expires_in", 0)),
+        }
         await _save_bangumi_auth(session, user_id, auth_to_save)
         await session.commit()
         return HTMLResponse("""

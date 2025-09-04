@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import Any, Dict, Tuple, Optional
 
 from pydantic import BaseModel
-from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, EnvSettingsSource
+from pydantic_settings import BaseSettings, PydanticBaseSettingsSource
 
 # 1. 为配置的不同部分创建 Pydantic 模型，提供类型提示和默认值
 class ServerConfig(BaseModel):
@@ -72,6 +72,8 @@ class Settings(BaseSettings):
     bangumi: BangumiConfig = BangumiConfig()
     log: LogConfig = LogConfig()
     douban: DoubanConfig = DoubanConfig()
+    # 新增：时区配置，从 TZ 环境变量读取
+    tz: str = "Asia/Shanghai"
     # 新增：环境标识和客户端配置
     environment: str = "production"
     # environment: str = "development"

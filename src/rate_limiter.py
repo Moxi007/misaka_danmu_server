@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from . import crud
 from .config_manager import ConfigManager
 from .scraper_manager import ScraperManager
+from .timezone import get_now
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +57,7 @@ class RateLimiter:
             global_state = await crud.get_or_create_rate_limit_state(session, "__global__")
             provider_state = await crud.get_or_create_rate_limit_state(session, provider_name)
 
-            now = datetime.now(timezone.utc)
+            now = get_now().replace(tzinfo=None)
             time_since_reset = now - global_state.lastResetTime
             
             if time_since_reset.total_seconds() >= period_seconds:
@@ -65,20 +66,20 @@ class RateLimiter:
                 await session.commit()
                 global_state = await crud.get_or_create_rate_limit_state(session, "__global__")
                 provider_state = await crud.get_or_create_rate_limit_state(session, provider_name)
-                time_since_reset = now - global_state.lastResetTime
+                time_since_reset = now - global_state.lastResetTime # Re-calculate with the new reset time
 
             if global_state.requestCount >= global_limit:
                 retry_after = period_seconds - time_since_reset.total_seconds()
                 msg = f"已达到全局速率限制 ({global_state.requestCount}/{global_limit})。"
                 self.logger.warning(msg)
-                raise RateLimitExceededError(msg, retry_after_seconds=retry_after)
+                raise RateLimitExceededError(msg, retry_after_seconds=max(0, retry_after))
 
             provider_quota = await self._get_provider_quota(provider_name)
             if provider_quota is not None and provider_state.requestCount >= provider_quota:
                 retry_after = period_seconds - time_since_reset.total_seconds()
                 msg = f"已达到源 '{provider_name}' 的特定配额 ({provider_state.requestCount}/{provider_quota})。"
                 self.logger.warning(msg)
-                raise RateLimitExceededError(msg, retry_after_seconds=retry_after)
+                raise RateLimitExceededError(msg, retry_after_seconds=max(0, retry_after))
 
     async def increment(self, provider_name: str):
         global_limit, _ = await self._get_global_limit()

@@ -4,7 +4,7 @@ import re
 import json
 import hashlib
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import ClassVar
 import zlib
 import xml.etree.ElementTree as ET

@@ -65,27 +65,6 @@ class ScraperManager:
         except Exception as e:
             logging.getLogger(__name__).error(f"加载公钥失败: {e}", exc_info=True)
             self._public_key = None
-    def _load_scrapers(self):
-        """
-        动态发现并加载 'scrapers' 目录下的所有搜索源类。
-        """
-        scrapers_dir = Path(__file__).parent / "scrapers"
-        for file in scrapers_dir.glob("*.py"):
-            if file.name.startswith("_") or file.name == "base.py":
-                continue
-
-            module_name = f".scrapers.{file.stem}"
-            try:
-                module = importlib.import_module(module_name, package="src")
-                for name, obj in inspect.getmembers(module, inspect.isclass):
-                    if issubclass(obj, BaseScraper) and obj is not BaseScraper:
-                        scraper_instance = obj()
-                        if scraper_instance.provider_name in self.scrapers:
-                            print(f"警告: 发现重复的搜索源 '{scraper_instance.provider_name}'。将被覆盖。")
-                        self.scrapers[scraper_instance.provider_name] = scraper_instance
-                        print(f"搜索源 '{scraper_instance.provider_name}' 已加载。")
-            except Exception as e:
-                print(f"从 {file.name} 加载搜索源失败: {e}")
     
     async def load_and_sync_scrapers(self):
         """
