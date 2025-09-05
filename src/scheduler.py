@@ -128,10 +128,11 @@ class SchedulerManager:
         if job:
             # 修正：使用 event.scheduled_run_time 作为 last_run_at 时间。
             # 这比 job.last_run_time 更可靠，因为它直接来自刚刚发生的事件，
-            # 并且能确保手动触发的任务也能正确记录运行时间。
-            last_run_time = event.scheduled_run_time
+            # 并且能确保手动触发的任务也能正确记录运行时间。并将其转换为 naive datetime。
+            last_run_time = event.scheduled_run_time.replace(tzinfo=None) if event.scheduled_run_time else None
+            next_run_time = job.next_run_time.replace(tzinfo=None) if job.next_run_time else None
             async with self._session_factory() as session:
-                await crud.update_scheduled_task_run_times(session, job.id, last_run_time, job.next_run_time)
+                await crud.update_scheduled_task_run_times(session, job.id, last_run_time, next_run_time)
             logger.info(f"已更新定时任务 '{job.name}' (ID: {job.id}) 的运行时间。")
 
     async def start(self):
@@ -154,8 +155,8 @@ class SchedulerManager:
                         runner = self._create_job_runner(task['jobType'], task['taskId'])
                         job = self.scheduler.add_job(runner, CronTrigger.from_crontab(task['cronExpression']), id=task['taskId'], name=task['name'], replace_existing=True)
                         if not task['isEnabled']: self.scheduler.pause_job(task['taskId'])
-                        # When loading, the job object is new and has no last_run_time. We only need to update the next_run_time.
-                        await crud.update_scheduled_task_run_times(session, job.id, task['lastRunAt'], job.next_run_time)
+                        next_run_time = job.next_run_time.replace(tzinfo=None) if job.next_run_time else None
+                        await crud.update_scheduled_task_run_times(session, job.id, task['lastRunAt'], next_run_time)
                     except Exception as e:
                         logger.error(f"加载定时任务 '{task['name']}' (ID: {task['taskId']}) 失败: {e}")
 
@@ -186,8 +187,9 @@ class SchedulerManager:
             await crud.create_scheduled_task(session, task_id, name, job_type, cron, is_enabled)
             runner = self._create_job_runner(job_type, task_id)
             job = self.scheduler.add_job(runner, CronTrigger.from_crontab(cron), id=task_id, name=name)
-            if not is_enabled: job.pause()        
-            await crud.update_scheduled_task_run_times(session, task_id, None, job.next_run_time)
+            if not is_enabled: job.pause()
+            next_run_time = job.next_run_time.replace(tzinfo=None) if job.next_run_time else None
+            await crud.update_scheduled_task_run_times(session, task_id, None, next_run_time)
             return await crud.get_scheduled_task(session, task_id)
 
     async def update_task(self, task_id: str, name: str, cron: str, is_enabled: bool) -> Optional[Dict[str, Any]]:
@@ -207,7 +209,8 @@ class SchedulerManager:
             job.reschedule(trigger=CronTrigger.from_crontab(cron))
             if is_enabled: job.resume()
             else: job.pause()
-            await crud.update_scheduled_task_run_times(session, task_id, task_info['lastRunAt'], job.next_run_time)
+            next_run_time = job.next_run_time.replace(tzinfo=None) if job.next_run_time else None
+            await crud.update_scheduled_task_run_times(session, task_id, task_info['lastRunAt'], next_run_time)
             return await crud.get_scheduled_task(session, task_id)
 
     async def delete_task(self, task_id: str):

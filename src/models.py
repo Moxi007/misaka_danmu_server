@@ -496,3 +496,19 @@ class RateLimitStatusResponse(BaseModel):
     """流控状态API的完整响应模型"""
     globalEnabled: bool
     providers: List[RateLimitStatusItem]
+
+
+class ControlRateLimitProviderStatus(BaseModel):
+    """用于外部API的单个流控规则状态"""
+    providerName: str
+    requestCount: int
+    quota: Union[int, str]
+
+class ControlRateLimitStatusResponse(BaseModel):
+    """用于外部API的流控状态响应模型"""
+    globalEnabled: bool
+    globalRequestCount: int
+    globalLimit: int
+    globalPeriod: str
+    secondsUntilReset: int
+    providers: List[ControlRateLimitProviderStatus]

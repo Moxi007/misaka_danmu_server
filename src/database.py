@@ -195,11 +195,11 @@ async def _migrate_add_source_url_to_episode(conn, db_type, db_name):
     new_col_exists = (await conn.execute(check_new_column_sql)).scalar_one_or_none() is not None
 
     if old_col_exists and not new_col_exists:
-        logger.info(f"在表 '{table_name}' 中发现旧列 '{old_column_name}'，正在重命名为 '{new_column_name}'...")
+        logger.info(f"在表 '{table_name}' 中发现旧列 '{old_column_name}'，正在将其重命名为 '{new_column_name}'...")
         await conn.execute(rename_column_sql)
         logger.info(f"成功重命名表 '{table_name}' 中的列。")
     elif not old_col_exists and not new_col_exists:
-        logger.info(f"列 '{table_name}.{new_column_name}' 不存在。正在添加...")
+        logger.info(f"列 '{table_name}.{new_column_name}' 不存在，正在添加...")
         await conn.execute(add_column_sql)
         logger.info(f"成功添加列 '{table_name}.{new_column_name}'。")
     elif new_col_exists:

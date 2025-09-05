@@ -60,6 +60,7 @@ async def lifespan(app: FastAPI):
         # API 和 Webhook
         'customApiDomain': ('', '用于拼接弹幕API地址的自定义域名。'),
         'webhookApiKey': ('', '用于Webhook调用的安全密钥。'),
+        'trustedProxies': ('', '受信任的反向代理IP列表，用逗号分隔。当请求来自这些IP时，将从 X-Forwarded-For 或 X-Real-IP 头中解析真实客户端IP。'),
         'externalApiKey': ('', '用于外部API调用的安全密钥。'),
         'webhookCustomDomain': ('', '用于拼接Webhook URL的自定义域名。'),
         # 认证

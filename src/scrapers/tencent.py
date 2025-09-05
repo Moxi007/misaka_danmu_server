@@ -222,10 +222,23 @@ class TencentScraper(BaseScraper):
 
         # httpx.AsyncClient 是 Python 中功能强大的异步HTTP客户端，等同于 C# 中的 HttpClient
         # 此处通过 cookies 参数传入字典，httpx 会自动将其格式化为正确的 Cookie 请求头，效果与C#代码一致
-        self.client = httpx.AsyncClient(headers=self.base_headers, cookies=self.cookies, timeout=20.0)
+        self.client: Optional[httpx.AsyncClient] = None
 
         # 新增：用于分集获取的API端点
         self.episodes_api_url = "https://pbaccess.video.qq.com/trpc.universal_backend_service.page_server_rpc.PageServer/GetPageData?video_appid=3000010&vversion_name=8.2.96&vversion_platform=2"
+
+    async def _ensure_client(self):
+        """Ensures the httpx client is initialized, with proxy support."""
+        if self.client is None:
+            # 修正：使用基类中的 _create_client 方法来创建客户端，以支持代理
+            self.client = await self._create_client(
+                headers=self.base_headers, cookies=self.cookies, timeout=20.0
+            )
+
+    async def _request(self, method: str, url: str, **kwargs) -> httpx.Response:
+        await self._ensure_client()
+        assert self.client is not None
+        return await self.client.request(method, url, **kwargs)
 
     # Porting TITLE_MAPPING from JS
     _TITLE_MAPPING = {
@@ -244,7 +257,9 @@ class TencentScraper(BaseScraper):
 
     async def close(self):
         """关闭HTTP客户端"""
-        await self.client.aclose()
+        if self.client:
+            await self.client.aclose()
+            self.client = None
 
     def _filter_search_item(self, item: TencentSearchItem, keyword: str) -> Optional[models.ProviderSearchInfo]:
         """
@@ -338,7 +353,7 @@ class TencentScraper(BaseScraper):
         results = []
         try:
             self.logger.info(f"Tencent (桌面API): 正在搜索 '{keyword}'...")
-            response = await self.client.post(url, json=payload)
+            response = await self._request("POST", url, json=payload)
             if await self._should_log_responses():
                 scraper_responses_logger.debug(f"Tencent Desktop Search Response (keyword='{keyword}'): {response.text}")
 
@@ -369,7 +384,7 @@ class TencentScraper(BaseScraper):
         results = []
         try:
             self.logger.info(f"Tencent (移动API): 正在搜索 '{keyword}'...")
-            response = await self.client.post(url, json=payload, headers=headers)
+            response = await self._request("POST", url, json=payload, headers=headers)
             if await self._should_log_responses():
                 scraper_responses_logger.debug(f"Tencent Mobile Search Response (keyword='{keyword}'): {response.text}")
 
@@ -402,9 +417,9 @@ class TencentScraper(BaseScraper):
         results = []
         try:
             self.logger.info(f"Tencent (MultiTerminal API): 正在搜索 '{keyword}'...")
-            # 使用独立的 httpx.AsyncClient 或更新现有客户端的 headers/cookies
-            # 为了隔离，这里创建一个新的临时客户端
-            async with httpx.AsyncClient(headers=headers, cookies=self.multiterminal_cookies, timeout=20.0) as client:
+            # 修正：为这个特殊的API调用也应用代理设置
+            proxy_to_use = await self._get_proxy_for_provider()
+            async with httpx.AsyncClient(headers=headers, cookies=self.multiterminal_cookies, timeout=20.0, proxy=proxy_to_use) as client:
                 response = await client.post(url, json=payload)
 
             if await self._should_log_responses():
@@ -507,7 +522,7 @@ class TencentScraper(BaseScraper):
         cid = cid_match.group(1)
         
         try:
-            response = await self.client.get(url)
+            response = await self._request("GET", url)
             response.raise_for_status()
             html_content = response.text
 
@@ -548,7 +563,7 @@ class TencentScraper(BaseScraper):
             }
         }
         try:
-            response = await self.client.post(self.episodes_api_url, json=payload)
+            response = await self._request("POST", self.episodes_api_url, json=payload)
             response.raise_for_status()
             result = TencentPageResult.model_validate(response.json())
 
@@ -584,7 +599,7 @@ class TencentScraper(BaseScraper):
                 self.logger.warning(f"API获取电影vid失败，回退到HTML页面解析 (cid={media_id})。")
                 try:
                     cover_url = f"https://v.qq.com/x/cover/{media_id}.html"
-                    response = await self.client.get(cover_url)
+                    response = await self._request("GET", cover_url)
                     response.raise_for_status()
                     html_content = response.text
 
@@ -682,7 +697,7 @@ class TencentScraper(BaseScraper):
                 "detail_page_type": "1"
             }
         }
-        response = await self.client.post(self.episodes_api_url, json=payload)
+        response = await self._request("POST", self.episodes_api_url, json=payload)
         response.raise_for_status()
         result = TencentPageResult.model_validate(response.json())
 
@@ -774,7 +789,7 @@ class TencentScraper(BaseScraper):
                 }
             }
             try:
-                response = await self.client.post(self.episodes_api_url, json=payload)
+                response = await self._request("POST", self.episodes_api_url, json=payload)
                 if await self._should_log_responses():
                     scraper_responses_logger.debug(f"Tencent Paginated Episodes Response (cid={cid}, page={page_num}): {response.text}")
                 response.raise_for_status()
@@ -962,7 +977,7 @@ class TencentScraper(BaseScraper):
         # 1. 获取弹幕分段索引
         index_url = f"https://dm.video.qq.com/barrage/base/{vid}"
         try:
-            response = await self.client.get(index_url)
+            response = await self._request("GET", index_url)
             if await self._should_log_responses():
                 scraper_responses_logger.debug(f"Tencent Danmaku Index Response (vid={vid}): {response.text}")
             response.raise_for_status()
@@ -997,7 +1012,7 @@ class TencentScraper(BaseScraper):
 
             segment_url = f"https://dm.video.qq.com/barrage/segment/{vid}/{segment_name}"
             try:
-                response = await self.client.get(segment_url)
+                response = await self._request("GET", segment_url)
                 if await self._should_log_responses():
                     scraper_responses_logger.debug(f"Tencent Danmaku Segment Response (vid={vid}, segment={segment_name}): status={response.status_code}")
                 response.raise_for_status()
@@ -1051,7 +1066,7 @@ class TencentScraper(BaseScraper):
             
             try:
                 self.logger.debug(f"请求分集列表 (cid={cid}), PageContext='{page_context}'")
-                response = await self.client.post(url, json=payload)
+                response = await self._request("POST", url, json=payload)
                 response.raise_for_status()
                 data = response.json()
     

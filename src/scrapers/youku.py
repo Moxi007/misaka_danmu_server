@@ -112,20 +112,23 @@ class YoukuScraper(BaseScraper):
         self.year_reg = re.compile(r"[12][890][0-9][0-9]")
         self.unused_words_reg = re.compile(r"<[^>]+>|【.+?】")
 
-        self.client = httpx.AsyncClient(
-            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"},
-            timeout=20.0,
-            follow_redirects=True
-        )
+        self.client: Optional[httpx.AsyncClient] = None
 
         # For danmaku signing
         self._cna = ""
         self._token = ""
 
+    async def _ensure_client(self):
+        """Ensures the httpx client is initialized, with proxy support."""
+        if self.client is None:
+            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"}
+            # 修正：使用基类中的 _create_client 方法来创建客户端，以支持代理
+            self.client = await self._create_client(headers=headers, timeout=20.0, follow_redirects=True)
+
     async def get_episode_blacklist_pattern(self) -> Optional[re.Pattern]:
         """
         获取并编译用于过滤分集的正则表达式。
-        此方法覆盖了基类中的方法，以确保对该源的正确回退逻辑。
+        此方法现在只使用数据库中配置的规则，如果规则为空，则不进行过滤。
         """
         # 1. 构造该源特定的配置键，确保与数据库键名一致
         provider_blacklist_key = f"{self.provider_name}_episode_blacklist_regex"
@@ -133,28 +136,21 @@ class YoukuScraper(BaseScraper):
         # 2. 从数据库动态获取用户自定义规则
         custom_blacklist_str = await self.config_manager.get(provider_blacklist_key)
 
-        final_blacklist_str = None
-        # 3. 优先使用用户自定义的、非空的规则
+        # 3. 仅当用户配置了非空的规则时才进行过滤
         if custom_blacklist_str and custom_blacklist_str.strip():
             self.logger.info(f"正在为 '{self.provider_name}' 使用数据库中的自定义分集黑名单。")
-            final_blacklist_str = custom_blacklist_str
-        # 4. 如果没有自定义规则，则回退到代码中内置的默认规则
-        elif self._PROVIDER_SPECIFIC_BLACKLIST_DEFAULT:
-            self.logger.info(f"正在为 '{self.provider_name}' 使用代码中内置的默认分集黑名单。")
-            final_blacklist_str = self._PROVIDER_SPECIFIC_BLACKLIST_DEFAULT
-        
-        if final_blacklist_str:
             try:
-                # 5. 编译正则表达式并返回
-                return re.compile(final_blacklist_str, re.IGNORECASE)
+                return re.compile(custom_blacklist_str, re.IGNORECASE)
             except re.error as e:
-                self.logger.error(f"编译 '{self.provider_name}' 的分集黑名单时出错: {e}。规则: '{final_blacklist_str}'")
+                self.logger.error(f"编译 '{self.provider_name}' 的分集黑名单时出错: {e}。规则: '{custom_blacklist_str}'")
         
-        # 6. 如果没有任何规则，返回 None
+        # 4. 如果规则为空或未配置，则不进行过滤
         return None
 
     async def close(self):
-        await self.client.aclose()
+        if self.client:
+            await self.client.aclose()
+            self.client = None
 
     async def search(self, keyword: str, episode_info: Optional[Dict[str, Any]] = None) -> List[models.ProviderSearchInfo]:
         """
@@ -187,6 +183,8 @@ class YoukuScraper(BaseScraper):
 
     async def _perform_network_search(self, keyword: str, episode_info: Optional[Dict[str, Any]] = None) -> List[models.ProviderSearchInfo]:
         """Performs the actual network search for Youku."""
+        await self._ensure_client()
+        assert self.client is not None
         self.logger.info(f"Youku: 正在为 '{keyword}' 执行网络搜索...")
         ua_encoded = urlencode({"userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"})
         keyword_encoded = urlencode({"keyword": keyword})
@@ -245,6 +243,8 @@ class YoukuScraper(BaseScraper):
 
     async def get_info_from_url(self, url: str) -> Optional[models.ProviderSearchInfo]:
         """从优酷URL中提取作品信息。"""
+        await self._ensure_client()
+        assert self.client is not None
         self.logger.info(f"Youku: 正在从URL提取信息: {url}")
         
         try:
@@ -355,6 +355,8 @@ class YoukuScraper(BaseScraper):
         return provider_episodes
 
     async def _get_episodes_page(self, show_id: str, page: int, page_size: int) -> Optional[YoukuVideoResult]:
+        await self._ensure_client()
+        assert self.client is not None
         url = f"https://openapi.youku.com/v2/shows/videos.json?client_id=53e6cc67237fc59a&package=com.huawei.hwvplayer.youku&ext=show&show_id={show_id}&page={page}&count={page_size}"
         response = await self.client.get(url)
         if await self._should_log_responses():
@@ -363,6 +365,8 @@ class YoukuScraper(BaseScraper):
         return YoukuVideoResult.model_validate(response.json())
 
     async def get_comments(self, episode_id: str, progress_callback: Optional[Callable] = None) -> Optional[List[dict]]:
+        await self._ensure_client()
+        assert self.client is not None
         vid = episode_id.replace("_", "=")
         
         try:
@@ -423,6 +427,8 @@ class YoukuScraper(BaseScraper):
         # 我们优先访问主站，因为它更不容易出网络问题。
         cna_val = self.client.cookies.get("cna")
         if not cna_val or force_refresh:
+            await self._ensure_client()
+            assert self.client is not None
             try:
                 log_msg = "强制刷新 'cna' cookie..." if force_refresh else "'cna' cookie 未找到, 正在访问 youku.com 以获取..."
                 self.logger.debug(f"Youku: {log_msg}")
@@ -435,6 +441,8 @@ class YoukuScraper(BaseScraper):
         # 步骤 2: 获取 '_m_h5_tk' 令牌, 此请求可能依赖于 'cna' cookie 的存在。
         token_val = self.client.cookies.get("_m_h5_tk")
         if not token_val or force_refresh:
+            await self._ensure_client()
+            assert self.client is not None
             try:
                 log_msg = "强制刷新 '_m_h5_tk' cookie..." if force_refresh else "'_m_h5_tk' cookie 未找到, 正在从 acs.youku.com 请求..."
                 self.logger.debug(f"Youku: {log_msg}")
@@ -459,6 +467,8 @@ class YoukuScraper(BaseScraper):
         return hashlib.md5(s.encode('utf-8')).hexdigest().lower()
 
     async def _get_danmu_content_by_mat(self, vid: str, mat: int) -> Optional[List[YoukuComment]]:
+        await self._ensure_client()
+        assert self.client is not None
         if not self._token:
             self.logger.error("Youku: Cannot get danmaku, _m_h5_tk is missing.")
             return []

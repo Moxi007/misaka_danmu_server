@@ -1589,8 +1589,8 @@ async def disable_incremental_refresh(session: AsyncSession, source_id: int) -> 
 
 async def create_oauth_state(session: AsyncSession, user_id: int) -> str:
     state = secrets.token_urlsafe(32)
-    expires_at = get_now().replace(tzinfo=None) + timedelta(minutes=10)
-    new_state = OauthState(stateKey=state, userId=user_id, expiresAt=expires_at) # expiresAt is explicitly set here
+    expires_at = (get_now() + timedelta(minutes=10)).replace(tzinfo=None)
+    new_state = OauthState(stateKey=state, userId=user_id, expiresAt=expires_at)
     session.add(new_state)
     await session.commit()
     return state
@@ -1944,6 +1944,12 @@ async def get_or_create_rate_limit_state(session: AsyncSession, provider_name: s
         )
         session.add(state)
         await session.flush()
+
+    # 关键修复：无论数据来自数据库还是新创建，都确保返回的时间是 naive 的。
+    # 这可以解决 PostgreSQL 驱动返回带时区时间对象的问题。
+    if state.lastResetTime and state.lastResetTime.tzinfo:
+        state.lastResetTime = state.lastResetTime.replace(tzinfo=None)
+
     return state
 
 async def get_all_rate_limit_states(session: AsyncSession) -> List[RateLimitState]:

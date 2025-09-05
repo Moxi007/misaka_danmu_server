@@ -256,15 +256,7 @@ class IqiyiScraper(BaseScraper):
         self.reg_video_info = re.compile(r'"videoInfo":(\{.+?\}),')
         self.cookies = {"pgv_pvid": "40b67e3b06027f3d","video_platform": "2","vversion_name": "8.2.95","video_bucketid": "4","video_omgid": "0a1ff6bc9407c0b1cff86ee5d359614d"}
         # 实体引用匹配正则
-        self.client = httpx.AsyncClient(
-            headers={
-                "User-Agent": self.mobile_user_agent,
-                "Referer": "https://www.iqiyi.com/",
-            },
-            cookies=self.cookies,
-            timeout=30.0, # 增加默认超时时间
-            follow_redirects=True
-        )
+        self.client: Optional[httpx.AsyncClient] = None
         self.entity_pattern = re.compile(r'&#[xX]?[0-9a-fA-F]+;')
 
         # XML 1.0规范允许的字符编码范围
@@ -277,10 +269,22 @@ class IqiyiScraper(BaseScraper):
             list(range(0xFDE0, 0xFFFD + 1))
          )
 
+    async def _ensure_client(self):
+        """Ensures the httpx client is initialized, with proxy support."""
+        if self.client is None:
+            headers = {
+                "User-Agent": self.mobile_user_agent,
+                "Referer": "https://www.iqiyi.com/",
+            }
+            # 修正：使用基类中的 _create_client 方法来创建客户端，以支持代理
+            self.client = await self._create_client(
+                headers=headers, cookies=self.cookies, timeout=30.0, follow_redirects=True
+            )
+
     async def get_episode_blacklist_pattern(self) -> Optional[re.Pattern]:
         """
         获取并编译用于过滤分集的正则表达式。
-        此方法覆盖了基类中的方法，以确保对该源的正确回退逻辑。
+        此方法现在只使用数据库中配置的规则，如果规则为空，则不进行过滤。
         """
         # 1. 构造该源特定的配置键，确保与数据库键名一致
         provider_blacklist_key = f"{self.provider_name}_episode_blacklist_regex"
@@ -288,29 +292,22 @@ class IqiyiScraper(BaseScraper):
         # 2. 从数据库动态获取用户自定义规则
         custom_blacklist_str = await self.config_manager.get(provider_blacklist_key)
 
-        final_blacklist_str = None
-        # 3. 优先使用用户自定义的、非空的规则
+        # 3. 仅当用户配置了非空的规则时才进行过滤
         if custom_blacklist_str and custom_blacklist_str.strip():
             self.logger.info(f"正在为 '{self.provider_name}' 使用数据库中的自定义分集黑名单。")
-            final_blacklist_str = custom_blacklist_str
-        # 4. 如果没有自定义规则，则回退到代码中内置的默认规则
-        elif self._PROVIDER_SPECIFIC_BLACKLIST_DEFAULT:
-            self.logger.info(f"正在为 '{self.provider_name}' 使用代码中内置的默认分集黑名单。")
-            final_blacklist_str = self._PROVIDER_SPECIFIC_BLACKLIST_DEFAULT
-        
-        if final_blacklist_str:
             try:
-                # 5. 编译正则表达式并返回
-                return re.compile(final_blacklist_str, re.IGNORECASE)
+                return re.compile(custom_blacklist_str, re.IGNORECASE)
             except re.error as e:
-                self.logger.error(f"编译 '{self.provider_name}' 的分集黑名单时出错: {e}。规则: '{final_blacklist_str}'")
+                self.logger.error(f"编译 '{self.provider_name}' 的分集黑名单时出错: {e}。规则: '{custom_blacklist_str}'")
         
-        # 6. 如果没有任何规则，返回 None
+        # 4. 如果规则为空或未配置，则不进行过滤
         return None
 
     async def close(self):
         """关闭HTTP客户端"""
-        await self.client.aclose()
+        if self.client:
+            await self.client.aclose()
+            self.client = None
 
     def _xor_operation(self, num: int) -> int:
         """实现JavaScript中的异或运算函数"""
@@ -364,6 +361,8 @@ class IqiyiScraper(BaseScraper):
         return md5_hash
 
     async def _request(self, method: str, url: str, **kwargs) -> httpx.Response: # type: ignore
+        await self._ensure_client()
+        assert self.client is not None
         return await self.client.request(method, url, **kwargs)
 
     async def _request_with_retry(self, method: str, url: str, retries: int = 3, **kwargs) -> httpx.Response:
@@ -1138,7 +1137,7 @@ class IqiyiScraper(BaseScraper):
         # 构建弹幕URL
         s1 = tv_id[-4:-2]
         s2 = tv_id[-2:]
-        # 修正：将弹幕服务器地址从 http 改为 https，以修复404错误
+        # 修正：将弹幕服务器地址从 http 改为 https，以修复404错误。
         url = f"https://cmts.iqiyi.com/bullet/{s1}/{s2}/{tv_id}_300_{mat}.z"
         self.logger.debug(f"URL构建: s1={s1}, s2={s2}, 完整URL={url}")
 

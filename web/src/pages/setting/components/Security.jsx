@@ -7,6 +7,7 @@ import { Button, Card, Form, Input, message } from 'antd'
 import { useState } from 'react'
 import { changePassword } from '../../../apis'
 import { useMessage } from '../../../MessageContext'
+import { TrustedProxies } from './TrustedProxies'
 
 export const Security = () => {
   const [form] = Form.useForm()
@@ -118,6 +119,7 @@ export const Security = () => {
           </Form.Item>
         </Form>
       </Card>
+      <TrustedProxies />
     </div>
   )
 }

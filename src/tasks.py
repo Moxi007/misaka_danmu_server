@@ -1270,7 +1270,8 @@ async def auto_search_and_import_task(
         for item in all_results:
             normalized_item_title = normalize_for_filtering(item.title)
             if not normalized_item_title: continue
-            if any((alias in normalized_item_title) or (normalized_item_title in alias) for alias in normalized_filter_aliases):
+            # 修正：使用更智能的模糊匹配来提高准确率，与UI搜索逻辑保持一致
+            if any(fuzz.partial_ratio(normalized_item_title, alias) > 85 for alias in normalized_filter_aliases):
                 filtered_results.append(item)
         logger.info(f"别名过滤: 从 {len(all_results)} 个原始结果中，保留了 {len(filtered_results)} 个相关结果。")
         all_results = filtered_results
@@ -1297,12 +1298,19 @@ async def auto_search_and_import_task(
         best_match = all_results[0]
 
         await progress_callback(80, f"选择最佳源: {best_match.provider}")
+
+        # 修正：如果初始搜索是基于关键词，我们没有预先获取元数据。
+        # 在这种情况下，使用从搜索结果中找到的最佳匹配项的海报URL。
+        if not image_url:
+            image_url = best_match.imageUrl
+            logger.info(f"使用最佳匹配源 '{best_match.provider}' 的海报URL: {image_url}")
+
         unique_key = f"import-{best_match.provider}-{best_match.mediaId}"
         task_coro = lambda s, cb: generic_import_task(
             provider=best_match.provider, mediaId=best_match.mediaId,
             animeTitle=main_title, mediaType=media_type, season=season, year=best_match.year,
             metadata_manager=metadata_manager,
-            currentEpisodeIndex=payload.episode, imageUrl=image_url,
+            currentEpisodeIndex=payload.episode, imageUrl=image_url, # 现在 imageUrl 已被正确填充
             doubanId=douban_id, tmdbId=tmdb_id, imdbId=imdb_id, tvdbId=tvdb_id, bangumiId=bangumi_id,
             progress_callback=cb, session=s, manager=scraper_manager, task_manager=task_manager,
             rate_limiter=rate_limiter

@@ -98,26 +98,28 @@ class BaseScraper(ABC):
         self.logger = logging.getLogger(self.__class__.__name__)
         self.client: Optional[httpx.AsyncClient] = None
 
+    async def _get_proxy_for_provider(self) -> Optional[str]:
+        """Helper to get the configured proxy URL for the current provider, if any."""
+        proxy_url = await self.config_manager.get("proxyUrl", "")
+        proxy_enabled_globally = (await self.config_manager.get("proxyEnabled", "false")).lower() == 'true'
+
+        if not proxy_enabled_globally or not proxy_url:
+            return None
+
+        async with self._session_factory() as session:
+            scraper_settings = await crud.get_all_scraper_settings(session)
+        
+        provider_setting = next((s for s in scraper_settings if s['providerName'] == self.provider_name), None)
+        use_proxy_for_this_provider = provider_setting.get('useProxy', False) if provider_setting else False
+
+        return proxy_url if use_proxy_for_this_provider else None
+
     async def _create_client(self, **kwargs) -> httpx.AsyncClient:
         """
         创建 httpx.AsyncClient，并根据配置应用代理。
         子类可以传递额外的 httpx.AsyncClient 参数。
         """
-        proxy_url_task = self.config_manager.get("proxy_url", "")
-        proxy_enabled_globally_task = self.config_manager.get("proxy_enabled", "false")
-
-        async with self._session_factory() as session:
-            scraper_settings_task = crud.get_all_scraper_settings(session)
-            proxy_url, proxy_enabled_str, scraper_settings = await asyncio.gather(
-                proxy_url_task, proxy_enabled_globally_task, scraper_settings_task
-            )
-        proxy_enabled_globally = proxy_enabled_str.lower() == 'true'
-
-        provider_setting = next((s for s in scraper_settings if s['providerName'] == self.provider_name), None)
-        use_proxy_for_this_provider = provider_setting.get('use_proxy', False) if provider_setting else False
-
-        proxy_to_use = proxy_url if proxy_enabled_globally and use_proxy_for_this_provider and proxy_url else None
-
+        proxy_to_use = await self._get_proxy_for_provider()
         client_kwargs = {"proxy": proxy_to_use, "timeout": 20.0, "follow_redirects": True, **kwargs}
         return httpx.AsyncClient(**client_kwargs)
 

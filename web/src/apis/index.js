@@ -241,6 +241,12 @@ export const getProxyConfig = () => api.get('/api/ui/config/proxy')
 /** 设置代理配置 */
 export const setProxyConfig = data => api.put('/api/ui/config/proxy', data)
 
+/** 获取受信任的反向代理IP */
+export const getTrustedProxiesConfig = () =>
+  api.get('/api/ui/config/trustedProxies')
+/** 设置受信任的反向代理IP */
+export const setTrustedProxiesConfig = data =>
+  api.put('/api/ui/config/trustedProxies', data)
 /** ---------------------------------------------- 搜索源配置----------------------------------------------  */
 /** 获取刮削器配置 */
 export const getScrapers = () => api.get('/api/ui/scrapers')

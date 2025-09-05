@@ -11,6 +11,7 @@ from passlib.context import CryptContext
 from . import crud, models
 from .config import settings
 from .database import get_db_session
+from .timezone import get_now
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/ui/auth/token")
@@ -57,14 +58,14 @@ async def create_access_token(data: dict, session: AsyncSession, expires_delta: 
     to_encode = data.copy()
     
     # 新增：添加标准声明以增强安全性和互操作性
-    now = datetime.now(timezone.utc)
+    now = get_now().replace(tzinfo=None) # 使用服务器本地时间的 naive datetime
     to_encode.update({
         "iat": now,  # Issued At: 令牌签发时间
         "jti": str(uuid.uuid4()), # JWT ID: 每个令牌的唯一标识符，可用于防止重放攻击
     })
 
-    secret_key = await crud.get_config_value(session, 'jwtSecretKey', settings.jwt.secret_key)
-    expire_minutes_str = await crud.get_config_value(session, 'jwtExpireMinutes', str(settings.jwt.access_token_expire_minutes))
+    secret_key = await crud.get_config_value(session, 'jwtSecretKey', settings.jwt.secret_key) # type: ignore
+    expire_minutes_str = await crud.get_config_value(session, 'jwtExpireMinutes', str(settings.jwt.access_token_expire_minutes)) # type: ignore
     expire_minutes = int(expire_minutes_str)
     # 如果有效期不为-1，则设置过期时间
     if expire_minutes != -1:

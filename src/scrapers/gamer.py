@@ -26,16 +26,19 @@ class GamerScraper(BaseScraper):
         super().__init__(session_factory, config_manager)
         self.cc_s2t = OpenCC('s2twp')  # Simplified to Traditional Chinese with phrases
         self.cc_t2s = OpenCC('t2s') # Traditional to Simplified
-        self.client = httpx.AsyncClient(
-            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"},
-            timeout=20.0,
-            follow_redirects=True
-        )
+        self.client: Optional[httpx.AsyncClient] = None
+
+    async def _ensure_client(self):
+        """Ensures the httpx client is initialized, with proxy support."""
+        if self.client is None:
+            # 修正：使用基类中的 _create_client 方法来创建客户端，以支持代理
+            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
+            self.client = await self._create_client(headers=headers, timeout=20.0, follow_redirects=True)
 
     async def get_episode_blacklist_pattern(self) -> Optional[re.Pattern]:
         """
         获取并编译用于过滤分集的正则表达式。
-        此方法覆盖了基类中的方法，以确保对该源的正确回退逻辑。
+        此方法现在只使用数据库中配置的规则，如果规则为空，则不进行过滤。
         """
         # 1. 构造该源特定的配置键，确保与数据库键名一致
         provider_blacklist_key = f"{self.provider_name}_episode_blacklist_regex"
@@ -43,24 +46,15 @@ class GamerScraper(BaseScraper):
         # 2. 从数据库动态获取用户自定义规则
         custom_blacklist_str = await self.config_manager.get(provider_blacklist_key)
 
-        final_blacklist_str = None
-        # 3. 优先使用用户自定义的、非空的规则
+        # 3. 仅当用户配置了非空的规则时才进行过滤
         if custom_blacklist_str and custom_blacklist_str.strip():
             self.logger.info(f"正在为 '{self.provider_name}' 使用数据库中的自定义分集黑名单。")
-            final_blacklist_str = custom_blacklist_str
-        # 4. 如果没有自定义规则，则回退到代码中内置的默认规则
-        elif hasattr(self, '_PROVIDER_SPECIFIC_BLACKLIST_DEFAULT') and self._PROVIDER_SPECIFIC_BLACKLIST_DEFAULT:
-            self.logger.info(f"正在为 '{self.provider_name}' 使用代码中内置的默认分集黑名单。")
-            final_blacklist_str = self._PROVIDER_SPECIFIC_BLACKLIST_DEFAULT
-        
-        if final_blacklist_str:
             try:
-                # 5. 编译正则表达式并返回
-                return re.compile(final_blacklist_str, re.IGNORECASE)
+                return re.compile(custom_blacklist_str, re.IGNORECASE)
             except re.error as e:
-                self.logger.error(f"编译 '{self.provider_name}' 的分集黑名单时出错: {e}。规则: '{final_blacklist_str}'")
+                self.logger.error(f"编译 '{self.provider_name}' 的分集黑名单时出错: {e}。规则: '{custom_blacklist_str}'")
         
-        # 6. 如果没有任何规则，返回 None
+        # 4. 如果规则为空或未配置，则不进行过滤
         return None
 
     async def _ensure_config(self):
@@ -68,6 +62,8 @@ class GamerScraper(BaseScraper):
         实时从数据库加载并应用Cookie和User-Agent配置。
         此方法在每次请求前调用，以确保配置实时生效。
         """
+        await self._ensure_client()
+        assert self.client is not None
         cookie = await self.config_manager.get("gamerCookie", "")
         user_agent = await self.config_manager.get("gamerUserAgent", "")
 
@@ -85,6 +81,8 @@ class GamerScraper(BaseScraper):
     async def _request(self, method: str, url: str, **kwargs) -> httpx.Response:
         """一个简单的请求包装器。"""
         await self._ensure_config()
+        # _ensure_config already calls _ensure_client
+        assert self.client is not None
         response = await self.client.request(method, url, **kwargs)
         if await self._should_log_responses():
             # 截断HTML以避免日志过长
@@ -92,7 +90,9 @@ class GamerScraper(BaseScraper):
         return response
 
     async def close(self):
-        await self.client.aclose()
+        if self.client:
+            await self.client.aclose()
+            self.client = None
 
     async def search(self, keyword: str, episode_info: Optional[Dict[str, Any]] = None) -> List[models.ProviderSearchInfo]:
         """

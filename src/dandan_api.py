@@ -2,6 +2,7 @@ import asyncio
 import logging
 import json
 import re
+import ipaddress
 from typing import List, Optional, Dict, Any
 from typing import Callable
 from datetime import datetime, timezone
@@ -41,6 +42,33 @@ METADATA_KEYWORDS_PATTERN = re.compile(
 # 这个子路由将包含所有接口的实际实现。
 # 它将被挂载到主路由的不同路径上。
 implementation_router = APIRouter()
+
+def _process_comments_for_dandanplay(comments_data: List[Dict[str, Any]]) -> List[models.Comment]:
+    """
+    将弹幕字典列表处理为符合 dandanplay 客户端规范的格式。
+    核心逻辑是移除 p 属性中的字体大小参数，同时保留其他所有部分。
+    原始格式: "时间,模式,字体大小,颜色,[来源]"
+    目标格式: "时间,模式,颜色,[来源]"
+    """
+    processed_comments = []
+    for i, item in enumerate(comments_data):
+        p_attr = item.get("p", "")
+        p_parts = p_attr.split(',')
+
+        # 查找可选的用户标签（如[bilibili]），以确定核心参数的数量
+        core_parts_count = len(p_parts)
+        for j, part in enumerate(p_parts):
+            if '[' in part and ']' in part:
+                core_parts_count = j
+                break
+        
+        if core_parts_count == 4:
+            del p_parts[2] # 移除字体大小 (index 2)
+        
+        new_p_attr = ','.join(p_parts)
+        processed_comments.append(models.Comment(cid=i, p=new_p_attr, m=item.get("m", "")))
+    return processed_comments
+
 
 class DandanApiRoute(APIRoute):
     """
@@ -369,15 +397,45 @@ def _parse_filename_for_match(filename: str) -> Optional[Dict[str, Any]]:
 
 
 async def get_token_from_path(
+    request: Request,
     token: str = Path(..., description="路径中的API授权令牌"),
     session: AsyncSession = Depends(get_db_session),
-    request: Request = None,
 ):
     """
     一个 FastAPI 依赖项，用于验证路径中的 token。
     这是为 dandanplay 客户端设计的特殊鉴权方式。
     此函数现在还负责UA过滤和访问日志记录。
     """
+    # --- 新增：解析真实客户端IP ---
+    # --- 新增：解析真实客户端IP，支持CIDR ---
+    config_manager: ConfigManager = request.app.state.config_manager
+    trusted_proxies_str = await config_manager.get("trustedProxies", "")
+    trusted_networks = []
+    if trusted_proxies_str:
+        for proxy_entry in trusted_proxies_str.split(','):
+            try:
+                trusted_networks.append(ipaddress.ip_network(proxy_entry.strip()))
+            except ValueError:
+                logger.warning(f"无效的受信任代理IP或CIDR: '{proxy_entry.strip()}'，已忽略。")
+    
+    client_ip_str = request.client.host if request.client else "127.0.0.1"
+    is_trusted = False
+    if trusted_networks:
+        try:
+            client_addr = ipaddress.ip_address(client_ip_str)
+            is_trusted = any(client_addr in network for network in trusted_networks)
+        except ValueError:
+            logger.warning(f"无法将客户端IP '{client_ip_str}' 解析为有效的IP地址。")
+
+    if is_trusted:
+        x_forwarded_for = request.headers.get("x-forwarded-for")
+        if x_forwarded_for:
+            client_ip_str = x_forwarded_for.split(',')[0].strip()
+        else:
+            # 如果没有 X-Forwarded-For，则回退到 X-Real-IP
+            client_ip_str = request.headers.get("x-real-ip", client_ip_str)
+    # --- IP解析结束 ---
+
     # 1. 验证 token 是否存在、启用且未过期
     request_path = request.url.path
     log_path = re.sub(r'^/api/v1/[^/]+', '', request_path) # 从路径中移除 /api/v1/{token} 部分
@@ -394,7 +452,7 @@ async def get_token_from_path(
                     expires_at = expires_at.replace(tzinfo=get_app_timezone())
                 is_expired = expires_at < get_now()
             status_to_log = 'denied_expired' if is_expired else 'denied_disabled'
-            await crud.create_token_access_log(session, token_record['id'], request.client.host, request.headers.get("user-agent"), log_status=status_to_log, path=log_path)
+            await crud.create_token_access_log(session, token_record['id'], client_ip_str, request.headers.get("user-agent"), log_status=status_to_log, path=log_path)
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid API token")
 
     # 2. UA 过滤
@@ -408,15 +466,15 @@ async def get_token_from_path(
         is_matched = any(rule in user_agent for rule in ua_list)
 
         if ua_filter_mode == 'blacklist' and is_matched:
-            await crud.create_token_access_log(session, token_info['id'], request.client.host, user_agent, log_status='denied_ua_blacklist', path=log_path)
+            await crud.create_token_access_log(session, token_info['id'], client_ip_str, user_agent, log_status='denied_ua_blacklist', path=log_path)
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User-Agent is blacklisted")
         
         if ua_filter_mode == 'whitelist' and not is_matched:
-            await crud.create_token_access_log(session, token_info['id'], request.client.host, user_agent, log_status='denied_ua_whitelist', path=log_path)
+            await crud.create_token_access_log(session, token_info['id'], client_ip_str, user_agent, log_status='denied_ua_whitelist', path=log_path)
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User-Agent not in whitelist")
 
     # 3. 记录成功访问
-    await crud.create_token_access_log(session, token_info['id'], request.client.host, user_agent, log_status='allowed', path=log_path)
+    await crud.create_token_access_log(session, token_info['id'], client_ip_str, user_agent, log_status='allowed', path=log_path)
 
     return token
 
@@ -774,8 +832,9 @@ async def get_external_comments_from_url(
             for comment in comments_data:
                 comment['m'] = converter.convert(comment['m'])
 
-    comments = [models.Comment.model_validate(c) for c in comments_data]
-    return models.CommentResponse(count=len(comments), comments=comments)
+    # 修正：使用统一的弹幕处理函数，以确保输出格式符合 dandanplay 客户端规范
+    processed_comments = _process_comments_for_dandanplay(comments_data)
+    return models.CommentResponse(count=len(processed_comments), comments=processed_comments)
 
 @implementation_router.get(
     "/comment/{episodeId}",
@@ -844,28 +903,8 @@ async def get_comments_for_dandan(
     # UA 已由 get_token_from_path 依赖项记录
     # logger.info(f"弹幕接口响应 (episodeId: {episodeId}):\n{json.dumps(log_message, indent=2, ensure_ascii=False)}")
 
-    # 智能处理弹幕参数以兼容 dandanplay 客户端
-    processed_comments = []
-    for i, item in enumerate(comments_data):
-        p_attr = item.get("p", "")
-        p_parts = p_attr.split(',')
-
-        # 查找可选的用户标签，以确定核心参数的数量
-        core_parts_count = len(p_parts)
-        for j, part in enumerate(p_parts):
-            if '[' in part and ']' in part:
-                core_parts_count = j
-                break
-        
-        # 如果核心参数是4个（时间,模式,字体,颜色），则移除字体大小以兼容客户端
-        if core_parts_count == 4:
-            # 移除字体大小部分 (index 2)
-            del p_parts[2]
-        
-        # 重新组合 p 属性
-        new_p_attr = ','.join(p_parts)
-        
-        processed_comments.append(models.Comment(cid=i, p=new_p_attr, m=item["m"]))
+    # 修正：使用统一的弹幕处理函数，以确保输出格式符合 dandanplay 客户端规范
+    processed_comments = _process_comments_for_dandanplay(comments_data)
 
     return models.CommentResponse(count=len(processed_comments), comments=processed_comments)
 

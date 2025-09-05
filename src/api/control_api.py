@@ -2,8 +2,10 @@ import logging
 import secrets
 import uuid
 import re
+import hashlib
+import ipaddress
 from enum import Enum
-from typing import List, Optional, Dict, Any, Callable
+from typing import List, Optional, Dict, Any, Callable, Union
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status, Path
@@ -21,6 +23,7 @@ from ..scheduler import SchedulerManager
 from ..scraper_manager import ScraperManager
 from ..task_manager import TaskManager, TaskSuccess, TaskStatus
 
+from ..timezone import get_now
 logger = logging.getLogger(__name__)
 
 # --- Helper Functions ---
@@ -75,30 +78,57 @@ async def verify_api_key(
     session: AsyncSession = Depends(get_db_session),
 ) -> str:
     """依赖项：验证API密钥并记录请求。如果验证成功，返回 API Key。"""
+    # --- 新增：解析真实客户端IP，支持CIDR ---
+    config_manager: ConfigManager = request.app.state.config_manager
+    trusted_proxies_str = await config_manager.get("trustedProxies", "")
+    trusted_networks = []
+    if trusted_proxies_str:
+        for proxy_entry in trusted_proxies_str.split(','):
+            try:
+                trusted_networks.append(ipaddress.ip_network(proxy_entry.strip()))
+            except ValueError:
+                logger.warning(f"无效的受信任代理IP或CIDR: '{proxy_entry.strip()}'，已忽略。")
+    
+    client_ip_str = request.client.host if request.client else "127.0.0.1"
+    is_trusted = False
+    if trusted_networks:
+        try:
+            client_addr = ipaddress.ip_address(client_ip_str)
+            is_trusted = any(client_addr in network for network in trusted_networks)
+        except ValueError:
+            logger.warning(f"无法将客户端IP '{client_ip_str}' 解析为有效的IP地址。")
+
+    if is_trusted:
+        x_forwarded_for = request.headers.get("x-forwarded-for")
+        if x_forwarded_for:
+            client_ip_str = x_forwarded_for.split(',')[0].strip()
+        else:
+            client_ip_str = request.headers.get("x-real-ip", client_ip_str)
+    # --- IP解析结束 ---
+
     endpoint = request.url.path
-    ip_address = request.client.host
 
     if not api_key:
         await crud.create_external_api_log(
-            session, ip_address, endpoint, status.HTTP_401_UNAUTHORIZED, "API Key缺失"
+            session, client_ip_str, endpoint, status.HTTP_401_UNAUTHORIZED, "API Key缺失"
         )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Not authenticated: API Key is missing.",
         )
 
-    stored_key = await crud.get_config_value(session, "externalApiKey", "")
+    stored_key = await config_manager.get("externalApiKey", "")
 
     if not stored_key or not secrets.compare_digest(api_key, stored_key):
         await crud.create_external_api_log(
-            session, ip_address, endpoint, status.HTTP_401_UNAUTHORIZED, "无效的API密钥"
+            session, client_ip_str, endpoint, status.HTTP_401_UNAUTHORIZED, "无效的API密钥"
         )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="无效的API密钥"
         )
     # 记录成功的API Key验证
     await crud.create_external_api_log(
-        session, ip_address, endpoint, status.HTTP_200_OK, "API Key验证通过"
+        session, client_ip_str, endpoint, status.HTTP_200_OK, "API Key验证通过"
     )
     return api_key
 
@@ -275,7 +305,7 @@ class ControlAnimeDetailsResponse(BaseModel):
 class ControlAutoImportRequest(BaseModel):
     searchType: AutoImportSearchType
     searchTerm: str
-    season: Optional[int] = 1
+    season: Optional[int] = None
     episode: Optional[int] = None
     mediaType: Optional[AutoImportMediaType] = None
 
@@ -285,8 +315,8 @@ class ControlAutoImportRequest(BaseModel):
 async def auto_import(
     searchType: AutoImportSearchType = Query(..., description="搜索类型。可选值: 'keyword', 'tmdb', 'tvdb', 'douban', 'imdb', 'bangumi'。"),
     searchTerm: str = Query(..., description="搜索内容。根据 searchType 的不同，这里应填入关键词或对应的平台ID。"),
-    season: Optional[int] = Query(1, description="季度号。"),
-    episode: Optional[int] = Query(None, description="集数。如果提供，将只导入单集。"),
+    season: Optional[int] = Query(None, description="季度号。如果未提供，将自动推断或默认为1。"),
+    episode: Optional[int] = Query(None, description="集数。如果提供，将只导入单集（此时必须提供季度）。"),
     mediaType: Optional[AutoImportMediaType] = Query(None, description="媒体类型。当 searchType 为 'keyword' 时必填。如果留空，将根据有无 'season' 参数自动推断。"),
     task_manager: TaskManager = Depends(get_task_manager),
     manager: ScraperManager = Depends(get_scraper_manager),
@@ -318,7 +348,7 @@ async def auto_import(
         -   **电影**:
             -   `season` 和 `episode` 参数会被忽略。
     -   `mediaType`:
-        -   当 `searchType` 为 `keyword` 时，此字段为必填项。
+        -   当 `searchType` 为 `keyword` 时，此字段为**必填项**。
         -   当 `searchType` 为其他ID类型时，此字段为可选项。如果留空，系统将根据 `season` 参数是否存在来自动推断媒体类型（有 `season` 则为电视剧，否则为电影）。
     """
     if episode is not None and season is None:
@@ -352,14 +382,16 @@ async def auto_import(
         )
         task_id, _ = await task_manager.submit_task(task_coro, task_title, unique_key=f"auto-import-{payload.searchType}-{payload.searchTerm}")
         return {"message": "自动导入任务已提交", "taskId": task_id}
+    except HTTPException as e:
+        # 捕获已知的冲突错误并重新抛出
+        raise e
     except Exception as e:
         # 捕获任何在任务提交阶段发生的异常，并确保释放锁
+        logger.error(f"提交自动导入任务时发生未知错误: {e}", exc_info=True)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="提交任务时发生内部错误。")
+    finally:
+        # 确保释放锁
         await manager.release_search_lock(api_key)
-        if isinstance(e, ValueError):
-            # 如果是已知的重复任务错误，返回 409
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
-        # 对于其他未知错误，重新抛出，由FastAPI处理
-        raise
 @router.get("/search", response_model=ControlSearchResponse, summary="搜索媒体")
 async def search_media(
     keyword: str,
@@ -367,6 +399,7 @@ async def search_media(
     episode: Optional[int] = Query(None, description="要搜索的集数 (可选)"),
     session: AsyncSession = Depends(get_db_session),
     manager: ScraperManager = Depends(get_scraper_manager),
+    metadata_manager: MetadataSourceManager = Depends(get_metadata_manager),
     api_key: str = Depends(verify_api_key)
 ):
     """
@@ -396,28 +429,65 @@ async def search_media(
             detail="已有搜索或自动导入任务正在进行中，请稍后再试。"
         )
     try:
-        # --- Start of WebUI Search Logic ---
-        try:
-            episode_info = {"season": season, "episode": episode} if season is not None or episode is not None else None
-            all_results = await manager.search_all([keyword], episode_info=episode_info)
-        except httpx.RequestError as e:
-            logger.error(f"搜索媒体 '{keyword}' 时发生网络错误: {e}", exc_info=True)
-            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=f"搜索时发生网络错误: {e}")
+        # --- Start of new logic, copied and adapted from ui_api.py ---
+        parsed_keyword = utils.parse_search_keyword(keyword)
+        search_title = parsed_keyword["title"]
+        # Prioritize explicit query params over parsed ones
+        final_season = season if season is not None else parsed_keyword.get("season")
+        final_episode = episode if episode is not None else parsed_keyword.get("episode")
 
-        normalized_search_title = _normalize_for_filtering(keyword)
-        filtered_results = [item for item in all_results if fuzz.token_set_ratio(_normalize_for_filtering(item.title), normalized_search_title) > 80]
-        logger.info(f"模糊标题过滤: 从 {len(all_results)} 个原始结果中，保留了 {len(filtered_results)} 个相关结果。")
+        episode_info = {"season": final_season, "episode": final_episode} if final_season is not None or final_episode is not None else None
+
+        # Create a dummy user for metadata calls, as this API is not user-specific
+        user = models.User(id=0, username="control_api")
+
+        logger.info(f"Control API 正在搜索: '{keyword}' (解析为: title='{search_title}', season={final_season}, episode={final_episode})")
+        if not manager.has_enabled_scrapers:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="没有启用的弹幕搜索源，请在“搜索源”页面中启用至少一个。"
+            )
+
+        # Get aliases from metadata sources
+        all_possible_aliases = await metadata_manager.search_aliases_from_enabled_sources(search_title, user)
+        
+        # Validate aliases
+        validated_aliases = set()
+        for alias in all_possible_aliases:
+            if fuzz.token_set_ratio(search_title, alias) > 70:
+                validated_aliases.add(alias)
+            else:
+                logger.debug(f"别名验证：已丢弃低相似度的别名 '{alias}' (与 '{search_title}' 相比)")
+        
+        filter_aliases = validated_aliases
+        filter_aliases.add(search_title)
+        logger.info(f"所有辅助搜索完成，最终别名集大小: {len(filter_aliases)}")
+        logger.info(f"用于过滤的别名列表: {list(filter_aliases)}")
+
+        # Search all scrapers using the main title
+        all_results = await manager.search_all([search_title], episode_info=episode_info)
+
+        # Filter with aliases
+        normalized_filter_aliases = {_normalize_for_filtering(alias) for alias in filter_aliases if alias}
+        filtered_results = []
+        for item in all_results:
+            normalized_item_title = _normalize_for_filtering(item.title)
+            if not normalized_item_title: continue
+            if any(fuzz.partial_ratio(normalized_item_title, alias) > 85 for alias in normalized_filter_aliases):
+                filtered_results.append(item)
+        
+        logger.info(f"别名过滤: 从 {len(all_results)} 个原始结果中，保留了 {len(filtered_results)} 个相关结果。")
         results = filtered_results
 
         for item in results:
             if item.type == 'tv_series' and _is_movie_by_title(item.title):
                 item.type = 'movie'
 
-        if season:
+        if final_season:
             original_count = len(results)
             filtered_by_type = [item for item in results if item.type == 'tv_series']
-            results = [item for item in filtered_by_type if item.season == season]
-            logger.info(f"根据指定的季度 ({season}) 进行过滤，从 {original_count} 个结果中保留了 {len(results)} 个。")
+            results = [item for item in filtered_by_type if item.season == final_season]
+            logger.info(f"根据指定的季度 ({final_season}) 进行过滤，从 {original_count} 个结果中保留了 {len(results)} 个。")
 
         source_settings = await crud.get_all_scraper_settings(session)
         source_order_map = {s['providerName']: s['displayOrder'] for s in source_settings}
@@ -426,7 +496,6 @@ async def search_media(
             return (source_order_map.get(item.provider, 999), -fuzz.token_set_ratio(keyword, item.title))
 
         sorted_results = sorted(results, key=sort_key)
-        # --- End of WebUI Search Logic ---
 
         search_id = str(uuid.uuid4())
         indexed_results = [ControlSearchResultItem(**r.model_dump(), resultIndex=i) for i, r in enumerate(sorted_results)]
@@ -486,8 +555,11 @@ async def direct_import(
         )
         task_id, _ = await task_manager.submit_task(task_coro, task_title, unique_key=unique_key)
         return {"message": "导入任务已提交", "taskId": task_id}
-    except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"提交直接导入任务时发生未知错误: {e}", exc_info=True)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="提交任务时发生内部错误。")
 
 @router.get("/episodes", response_model=List[models.ProviderEpisodeInfo], summary="获取搜索结果的分集列表")
 async def get_episodes(
@@ -577,7 +649,12 @@ async def edited_import(
     )
 
     task_title = f"外部API编辑后导入: {task_payload.animeTitle} ({task_payload.provider})"
-    unique_key = f"import-{task_payload.provider}-{task_payload.mediaId}"
+    # 修正：使 unique_key 更具体，以允许对同一媒体的不同分集列表进行排队导入。
+    # 这解决了在一次导入完成后，无法立即为同一媒体提交另一次导入的问题。
+    episode_indices_str = ",".join(sorted([str(ep.episodeIndex) for ep in payload.episodes]))
+    episodes_hash = hashlib.md5(episode_indices_str.encode('utf-8')).hexdigest()[:8]
+    unique_key = f"import-{task_payload.provider}-{task_payload.mediaId}-{episodes_hash}"
+
     try:
         task_coro = lambda session, cb: tasks.edited_import_task(
             request_data=task_payload, progress_callback=cb, session=session,
@@ -586,8 +663,13 @@ async def edited_import(
         )
         task_id, _ = await task_manager.submit_task(task_coro, task_title, unique_key=unique_key)
         return {"message": "编辑后导入任务已提交", "taskId": task_id}
-    except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+    except HTTPException as e:
+        # 修正：捕获正确的 HTTPException 并重新抛出
+        raise e
+    except Exception as e:
+        # 捕获其他意外错误
+        logger.error(f"提交编辑后导入任务时发生未知错误: {e}", exc_info=True)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="提交任务时发生内部错误。")
 
 @router.post("/import/xml", status_code=status.HTTP_202_ACCEPTED, summary="从XML/文本导入弹幕", response_model=ControlTaskResponse)
 async def xml_import(
@@ -636,8 +718,11 @@ async def xml_import(
         )
         task_id, _ = await task_manager.submit_task(task_coro, task_title, unique_key=unique_key)
         return {"message": "XML导入任务已提交", "taskId": task_id}
-    except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"提交XML导入任务时发生未知错误: {e}", exc_info=True)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="提交任务时发生内部错误。")
 
 
 @router.post("/import/url", status_code=status.HTTP_202_ACCEPTED, summary="从URL导入", response_model=ControlTaskResponse)
@@ -688,8 +773,11 @@ async def url_import(
         )
         task_id, _ = await task_manager.submit_task(task_coro, task_title, unique_key=unique_key)
         return {"message": "URL导入任务已提交", "taskId": task_id}
-    except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"提交URL导入任务时发生未知错误: {e}", exc_info=True)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="提交任务时发生内部错误。")
 
 # --- 媒体库管理 ---
 
@@ -1052,6 +1140,59 @@ async def get_execution_task_id(
     """
     execution_id = await crud.get_execution_task_id_from_scheduler_task(session, taskId)
     return ExecutionTaskResponse(schedulerTaskId=taskId, executionTaskId=execution_id)
+
+@router.get("/rate-limit/status", response_model=models.ControlRateLimitStatusResponse, summary="获取流控状态")
+async def get_rate_limit_status(
+    session: AsyncSession = Depends(get_db_session),
+    config_manager: ConfigManager = Depends(get_config_manager),
+    scraper_manager: ScraperManager = Depends(get_scraper_manager),
+    rate_limiter: RateLimiter = Depends(get_rate_limiter)
+):
+    """
+    获取所有流控规则的当前状态，包括全局和各源的配额使用情况。
+    """
+    # 在获取状态前，先触发一次全局流控的检查，这会强制重置过期的计数器
+    try:
+        await rate_limiter.check("__global__")
+    except RateLimitExceededError:
+        # 我们只关心检查和重置的副作用，不关心它是否真的超限，所以忽略此错误
+        pass
+    except Exception as e:
+        # 记录其他潜在错误，但不中断状态获取
+        logger.error(f"在获取流控状态时，检查全局流控失败: {e}")
+
+    global_enabled_str = await config_manager.get("globalRateLimitEnabled", "true")
+    global_enabled = global_enabled_str.lower() == 'true'
+    global_limit_str = await config_manager.get("globalRateLimitCount", "50")
+    global_limit = int(global_limit_str) if global_limit_str.isdigit() else 50
+    global_period = await config_manager.get("globalRateLimitPeriod", "hour")
+    period_seconds = {"second": 1, "minute": 60, "hour": 3600, "day": 86400}.get(global_period, 3600)
+
+    all_states = await crud.get_all_rate_limit_states(session)
+    states_map = {s.providerName: s for s in all_states}
+
+    global_state = states_map.get("__global__")
+    seconds_until_reset = 0
+    if global_state:
+        time_since_reset = get_now().replace(tzinfo=None) - global_state.lastResetTime
+        seconds_until_reset = max(0, int(period_seconds - time_since_reset.total_seconds()))
+
+    provider_items = []
+    all_scrapers = await crud.get_all_scraper_settings(session)
+    for scraper_setting in all_scrapers:
+        provider_name = scraper_setting['providerName']
+        provider_state = states_map.get(provider_name)
+        quota: Union[int, str] = "∞"
+        try:
+            scraper_instance = scraper_manager.get_scraper(provider_name)
+            provider_quota = getattr(scraper_instance, 'rate_limit_quota', None)
+            if provider_quota is not None and provider_quota > 0:
+                quota = provider_quota
+        except ValueError:
+            pass
+        provider_items.append(models.ControlRateLimitProviderStatus(providerName=provider_name, requestCount=provider_state.requestCount if provider_state else 0, quota=quota))
+
+    return models.ControlRateLimitStatusResponse(globalEnabled=global_enabled, globalRequestCount=global_state.requestCount if global_state else 0, globalLimit=global_limit, globalPeriod=global_period, secondsUntilReset=seconds_until_reset, providers=provider_items)
 
 
 # --- 定时任务管理 ---
