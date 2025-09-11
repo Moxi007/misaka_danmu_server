@@ -27,47 +27,28 @@ class RateLimiter:
         self._period_map = {"second": 1, "minute": 60, "hour": 3600, "day": 86400}
         self.logger = logging.getLogger(self.__class__.__name__)
 
-        self.enabled: bool = True
-        self.global_limit: int = 50
+        # 强制禁用速率限制
+        self.enabled: bool = False
+        self.global_limit: int = 0  # 设置为0表示无限制
         self.global_period: str = "hour"
 
-        try:
-            config_path = Path(__file__).parent / "rate_limit.bin"
-            if config_path.exists():
-                with open(config_path, 'rb') as f:
-                    obfuscated_bytes = f.read()
-
-                json_bytes = bytearray()
-                for i, byte in enumerate(obfuscated_bytes):
-                    json_bytes.append(byte ^ XOR_KEY[i % len(XOR_KEY)])
-
-                config_data = json.loads(json_bytes.decode('utf-8'))
-                
-                self.enabled = config_data.get("enabled", self.enabled)
-                self.global_limit = config_data.get("global_limit", self.global_limit)
-                self.global_period = config_data.get("global_period", self.global_period)
-                self.logger.info(f"成功加载速率限制参数。")
-            else:
-                self.logger.warning("未找到配置，将使用默认的速率限制参数。")
-        except Exception as e:
-            self.logger.error(f"加载配置失败，将使用默认值。错误: {e}", exc_info=True)
+        # 跳过配置文件读取，直接使用禁用设置
+        self.logger.info("速率限制已被强制禁用")
 
     async def _get_provider_quota(self, provider_name: str) -> Optional[int]:
-        try:
-            scraper = self._scraper_manager.get_scraper(provider_name)
-            quota = getattr(scraper, 'rate_limit_quota', None)
-            if quota is not None and quota > 0:
-                return quota
-        except (ValueError, AttributeError):
-            pass
+        # 禁用状态下始终返回None，表示无限制
         return None
 
     def _get_global_limit(self) -> tuple[int, str]:
-        if not self.enabled:
-            return 0, "hour"
-        return self.global_limit, self.global_period
+        # 禁用状态下返回0表示无限制
+        return 0, "hour"
 
     async def check(self, provider_name: str):
+        # 如果禁用则直接返回，不进行任何检查
+        if not self.enabled:
+            return
+        
+        # 以下代码在启用时才会执行
         global_limit, period_str = self._get_global_limit()
         if global_limit <= 0:
             return
@@ -105,6 +86,11 @@ class RateLimiter:
                 raise RateLimitExceededError(msg, retry_after_seconds=max(0, retry_after))
 
     async def increment(self, provider_name: str):
+        # 如果禁用则直接返回，不进行任何计数增加
+        if not self.enabled:
+            return
+
+        # 以下代码在启用时才会执行
         global_limit, _ = self._get_global_limit()
         if global_limit <= 0:
             return
