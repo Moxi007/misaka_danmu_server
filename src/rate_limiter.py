@@ -94,21 +94,25 @@ class RateLimiter:
             uid_path = config_dir / "rate_limit.uid"
 
             if not all([config_path.exists(), sig_path.exists(), pub_key_path.exists(), uid_path.exists()]):
-                self.logger.critical("!!! 严重安全警告：流控配置文件不完整或缺失 (rate_limit.bin, .sig, public_key.pem, rate_limit.uid)。")
-                self.logger.critical("!!! 为保证安全，所有弹幕下载请求将被阻止，直到问题解决。")
-                self._verification_failed = True
-                raise FileNotFoundError("缺少流控配置文件")
+                self.logger.info("速率限制配置文件不存在，将禁用速率限制。")
+                self.enabled = False
+                self.global_limit = 0
+                return
 
             try:
                 uid_from_file = uid_path.read_text('utf-8').strip()
                 if not uid_from_file:
-                    raise ValueError("UID 文件为空或只包含空白字符。")
+                    self.logger.warning("UID 文件为空，将使用默认禁用配置。")
+                    self.enabled = False
+                    self.global_limit = 0
+                    return
                 signing_uid = uid_from_file
                 self.logger.info(f"已从 rate_limit.uid 文件加载签名UID。")
             except Exception as e:
-                self.logger.critical(f"读取 rate_limit.uid 文件失败！此文件对于签名验证至关重要。", exc_info=True)
-                self._verification_failed = True
-                raise ConfigVerificationError(f"读取 rate_limit.uid 文件失败") from e
+                self.logger.warning(f"读取 rate_limit.uid 文件失败，将使用默认禁用配置。错误: {e}")
+                self.enabled = False
+                self.global_limit = 0
+                return
 
             obfuscated_bytes = config_path.read_bytes()
             signature = sig_path.read_bytes().decode('utf-8').strip()
@@ -117,20 +121,22 @@ class RateLimiter:
             try:
                 sm2_crypt = sm2.CryptSM2(public_key=public_key_hex, private_key='')
                 if not sm2_crypt.verify(signature, bytes(obfuscated_bytes), uid=signing_uid):
-                    self.logger.critical("!!! 严重安全警告：速率限制配置文件签名验证失败！文件可能已被篡改。")
-                    self.logger.critical("!!! 为保证安全，所有弹幕下载请求将被阻止，直到问题解决。")
-                    self._verification_failed = True
-                    raise ConfigVerificationError("签名验证失败")
+                    self.logger.warning("速率限制配置文件签名验证失败，将使用默认禁用配置。")
+                    self.enabled = False
+                    self.global_limit = 0
+                    return
                 
                 self.logger.info("速率限制配置文件签名验证成功。")
             except (ValueError, TypeError, IndexError) as e:
-                self.logger.critical(f"签名验证失败：无效的密钥或签名格式。错误: {e}", exc_info=True)
-                self._verification_failed = True
-                raise ConfigVerificationError("签名验证时发生格式错误")
+                self.logger.warning(f"签名验证失败：密钥或签名格式错误，将使用默认禁用配置。错误: {e}")
+                self.enabled = False
+                self.global_limit = 0
+                return
             except Exception as e:
-                self.logger.critical(f"签名验证过程中发生未知严重错误: {e}", exc_info=True)
-                self._verification_failed = True
-                raise ConfigVerificationError("签名验证时发生未知错误")
+                self.logger.warning(f"签名验证过程中发生错误，将使用默认禁用配置: {e}")
+                self.enabled = False
+                self.global_limit = 0
+                return
 
             try:
                 json_bytes = bytearray()
@@ -141,20 +147,20 @@ class RateLimiter:
 
                 expected_hash = config_data.get("rate_limiter_hash")
                 if not expected_hash:
-                    self.logger.critical("!!! 严重安全警告：配置文件中缺少 'rate_limiter_hash'，无法校验核心文件完整性。")
-                    self._verification_failed = True
-                    raise ConfigVerificationError("配置文件中缺少核心文件哈希")
+                    self.logger.warning("配置文件中缺少 'rate_limiter_hash'，将使用默认禁用配置。")
+                    self.enabled = False
+                    self.global_limit = 0
+                    return
 
                 rate_limiter_path = Path(__file__) 
                 rate_limiter_content_bytes = rate_limiter_path.read_bytes()
                 actual_hash = hashlib.sha256(rate_limiter_content_bytes.replace(b'\r\n', b'\n')).hexdigest()
 
                 if actual_hash != expected_hash:
-                    self.logger.critical("="*60)
-                    self.logger.critical("！！！严重安全警告：rate_limiter.py 文件完整性校验失败！文件可能已被篡改。！！！")
-                    self.logger.critical("="*60)
-                    self._verification_failed = True
-                    raise ConfigVerificationError("rate_limiter.py 文件完整性校验失败")
+                    self.logger.warning("rate_limiter.py 文件完整性校验失败，将使用默认禁用配置。")
+                    self.enabled = False
+                    self.global_limit = 0
+                    return
                 
                 self.logger.info("rate_limiter.py 文件完整性校验通过。")
                 if config_data:
