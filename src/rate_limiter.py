@@ -31,7 +31,8 @@ class ConfigVerificationError(Exception):
 XOR_KEY = b"T3Nn@pT^K!v8&s$U@w#Z&e3S@pT^K!v8&s$U@w#Z&e3S@pT^K!v8&s$U@w#Z&e3S@pT^K!v8&s$U@w#Z&e3S@pT^K!v8&s$U@w#Z&e3S@pT^K!v8&s$U@w#Z&e3S@pT^K!v8&s$U@w#Z&e3S@pT^K!v8&s$U@w#Z&e3S"
 
 original_sm3_z = sm2.CryptSM2._sm3_z
-def fixed_sm3_z(self, uid: Union[str, bytes]): 
+
+def fixed_sm3_z(self, uid: Union[str, bytes]):  # 这里添加了冒号
     if isinstance(uid, str):
         uid_bytes = uid.encode('utf-8')
     else:
@@ -41,6 +42,7 @@ def fixed_sm3_z(self, uid: Union[str, bytes]): 
 sm2.CryptSM2._sm3_z = fixed_sm3_z 
 
 original_verify = sm2.CryptSM2.verify
+
 def fixed_verify(self, sign: str, data: bytes, uid: Union[str, bytes]) -> bool:
     """
     一个包装函数，它在内部计算 Z 值和消息的哈希，然后调用原始的 verify 方法。
