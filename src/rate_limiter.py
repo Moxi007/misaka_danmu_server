@@ -84,7 +84,7 @@ class RateLimiter:
         self._verification_failed: bool = False
 
         self.enabled: bool = True
-        self.global_limit: int = 50
+        self.global_limit: int = 500
         self.global_period_seconds: int = 3600 
         try:
             config_dir = Path(__file__).parent / "rate_limit"
