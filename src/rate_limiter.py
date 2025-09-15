@@ -84,7 +84,7 @@ class RateLimiter:
         self._verification_failed: bool = False
 
         self.enabled: bool = True
-        self.global_limit: int = 500
+        self.global_limit: int = 50
         self.global_period_seconds: int = 3600 
         try:
             config_dir = Path(__file__).parent / "rate_limit"
@@ -162,7 +162,7 @@ class RateLimiter:
                     self.global_limit = config_data.get("global_limit", self.global_limit)
                     if "global_period_seconds" in config_data:
                         self.global_period_seconds = config_data.get("global_period_seconds", self.global_period_seconds)
-                    elif "global_period" in config_data: 
+                    elif "global_period" in config_data:
                         period_map = {"second": 1, "minute": 60, "hour": 3600, "day": 86400}
                         self.global_period_seconds = period_map.get(config_data["global_period"], 3600)
                     self.logger.info(f"成功加载并验证了速率限制配置文件。参数: 启用={self.enabled}, 限制={self.global_limit}次/{self.global_period_seconds}秒")
