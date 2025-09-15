@@ -75,5 +75,3 @@ jobs:
           platforms: ${{ steps.prep.outputs.platforms }}
           push: true
           tags: ${{ steps.prep.outputs.tags }}
-          secrets: |
-            XOR_KEY_SECRET=${{ secrets.XOR_KEY_SECRET }}
