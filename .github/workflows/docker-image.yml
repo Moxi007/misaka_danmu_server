@@ -32,8 +32,8 @@ jobs:
           DOCKER_IMAGE=${{ secrets.DOCKERHUB_USERNAME }}/misaka_danmu_server
           # 如果是推送到 main 分支
           if [[ $GITHUB_REF == refs/heads/main ]]; then
-            # 设置输出: "user/repo:main"
-            echo "tags=${DOCKER_IMAGE}:main" >> $GITHUB_OUTPUT
+            # 设置输出: "user/repo:latest"
+            echo "tags=${DOCKER_IMAGE}:latest" >> $GITHUB_OUTPUT
           # 如果是标签推送 (e.g., v1.2.3)
           elif [[ $GITHUB_REF == refs/tags/v* ]]; then
             # 从 ref 中提取标签名 (e.g., v1.2.3)
