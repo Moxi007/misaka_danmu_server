@@ -1142,11 +1142,11 @@ class IqiyiScraper(BaseScraper):
     async def _filter_and_finalize_episodes(self, episodes: List[models.ProviderEpisodeInfo], target_episode_index: Optional[int]) -> List[models.ProviderEpisodeInfo]:
         """对分集列表应用黑名单过滤并返回最终结果。"""
         # 统一过滤逻辑
-        # 修正：安全地获取并组合黑名单规则
-        blacklist_rules = [p for p in [
-            await self.config_manager.get("episode_blacklist_regex", self._GLOBAL_EPISODE_BLACKLIST_DEFAULT),
-            await self.config_manager.get(f"{self.provider_name}_episode_blacklist_regex", self._PROVIDER_SPECIFIC_BLACKLIST_DEFAULT)
-        ] if p]
+        # 修正：iQiyi源只应使用其专属的黑名单，以避免全局规则误杀。
+        provider_pattern_str = await self.config_manager.get(
+            f"{self.provider_name}_episode_blacklist_regex", self._PROVIDER_SPECIFIC_BLACKLIST_DEFAULT
+        )
+        blacklist_rules = [provider_pattern_str] if provider_pattern_str else []
         
         filtered_episodes = episodes
         if blacklist_rules:

@@ -23,11 +23,13 @@ jobs:
         uses: actions/checkout@v4
 
       # 步骤2: 准备 Docker 镜像标签
-      # 根据触发事件（分支或标签）动态生成镜像标签
-      - name: Prepare Docker tags
-        id: prep_tags
+      # 根据触发事件（分支或标签）动态生成镜像标签和平台
+      - name: Prepare Docker tags and platforms
+        id: prep
         run: |
           DOCKER_IMAGE=${{ secrets.DOCKERHUB_USERNAME }}/misaka_danmu_server
+          # 默认构建所有平台
+          PLATFORMS="linux/amd64,linux/arm64"
           # 如果是标签推送 (e.g., v1.2.3)
           if [[ $GITHUB_REF == refs/tags/v* ]]; then
             # 从 ref 中提取标签名 (e.g., v1.2.3)
@@ -38,11 +40,14 @@ jobs:
           elif [[ $GITHUB_REF == refs/heads/test ]]; then
             # 设置输出: "user/repo:test"
             echo "tags=${DOCKER_IMAGE}:test" >> $GITHUB_OUTPUT
+            # 仅为 test 分支构建 amd64
+            PLATFORMS="linux/amd64"
           # 如果是推送到 beta 分支
           elif [[ $GITHUB_REF == refs/heads/beta ]]; then
             # 设置输出: "user/repo:beta"
             echo "tags=${DOCKER_IMAGE}:beta" >> $GITHUB_OUTPUT
           fi
+          echo "platforms=${PLATFORMS}" >> $GITHUB_OUTPUT
 
       # 步骤3: 设置 Docker Buildx
       - name: Set up Docker Buildx
@@ -58,11 +63,11 @@ jobs:
       # 步骤5: 构建并推送 Docker 镜像
       # 仅当上一步成功生成了标签时才运行此步骤
       - name: Build and push Docker image
-        if: steps.prep_tags.outputs.tags
+        if: steps.prep.outputs.tags
         uses: docker/build-push-action@v5
         with:
           context: .
           file: ./Dockerfile
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ steps.prep.outputs.platforms }}
           push: true
-          tags: ${{ steps.prep_tags.outputs.tags }}
+          tags: ${{ steps.prep.outputs.tags }}
