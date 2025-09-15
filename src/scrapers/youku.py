@@ -396,7 +396,11 @@ class YoukuScraper(BaseScraper):
         一个集中的辅助函数，用于过滤、格式化和编号原始的优酷分集列表。
         """
         # --- 关键修正：总是在获取数据后（无论来自缓存还是网络）应用过滤 ---
-        blacklist_pattern = await self.get_episode_blacklist_pattern()
+        # 修正：Youku源只应使用其专属的黑名单，以避免全局规则误杀。
+        provider_pattern_str = await self.config_manager.get(
+            f"{self.provider_name}_episode_blacklist_regex", self._PROVIDER_SPECIFIC_BLACKLIST_DEFAULT
+        )
+        blacklist_pattern = re.compile(provider_pattern_str, re.IGNORECASE) if provider_pattern_str else None
         
         filtered_episodes = []
         if blacklist_pattern:
