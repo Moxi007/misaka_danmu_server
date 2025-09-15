@@ -1,7 +1,7 @@
 # --- Stage 1: Build Frontend ---
 FROM node:20-alpine AS builder
 
-# 安装 Python 和编译依赖
+# 安装 Python 和编译依赖（仅用于前端构建）
 RUN apk add --no-cache python3 py3-pip build-base python3-dev
 
 WORKDIR /app/web
@@ -15,13 +15,8 @@ COPY web/ ./
 COPY src/ ./src/
 COPY requirements.txt .
 
-# 安装 Python 依赖和 Nuitka
-RUN pip install --no-cache-dir --break-system-packages -r requirements.txt nuitka
-
-# 编译 rate_limiter.py
-# --module: 编译为 .so 模块
-# --output-dir: 指定输出目录
-RUN python3 -m nuitka --module src/rate_limiter.py --output-dir=src/
+# 安装 Python 依赖
+RUN pip install --no-cache-dir --break-system-packages -r requirements.txt
  
 # 执行构建
 RUN npm run build
@@ -63,10 +58,6 @@ RUN pip install --no-cache-dir --break-system-packages -r requirements.txt
 COPY src/ ./src/
 COPY static/ ./static/
 COPY config/ ./config/
-# 移除 rate_limiter.py 源码
-RUN rm src/rate_limiter.py
-# 从 builder 阶段复制编译好的 .so 文件
-COPY --from=builder /app/web/src/*.so ./src/
 COPY exec.sh /exec.sh
 COPY run.sh /run.sh
 RUN chmod +x /exec.sh /run.sh
