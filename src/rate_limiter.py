@@ -31,18 +31,16 @@ class ConfigVerificationError(Exception):
 XOR_KEY = b"T3Nn@pT^K!v8&s$U@w#Z&e3S@pT^K!v8&s$U@w#Z&e3S@pT^K!v8&s$U@w#Z&e3S@pT^K!v8&s$U@w#Z&e3S@pT^K!v8&s$U@w#Z&e3S@pT^K!v8&s$U@w#Z&e3S@pT^K!v8&s$U@w#Z&e3S@pT^K!v8&s$U@w#Z&e3S"
 
 original_sm3_z = sm2.CryptSM2._sm3_z
-
-def fixed_sm3_z(self, uid: Union[str, bytes]):  # 这里添加了冒号
+def fixed_sm3_z(self, uid: Union[str, bytes]): 
     if isinstance(uid, str):
         uid_bytes = uid.encode('utf-8')
     else:
         uid_bytes = uid
     return original_sm3_z(self, uid_bytes)
 
-sm2.CryptSM2._sm3_z = fixed_sm3_z 
+sm2.CryptSM2._sm3_z = fixed_sm3_z 
 
 original_verify = sm2.CryptSM2.verify
-
 def fixed_verify(self, sign: str, data: bytes, uid: Union[str, bytes]) -> bool:
     """
     一个包装函数，它在内部计算 Z 值和消息的哈希，然后调用原始的 verify 方法。
@@ -53,7 +51,7 @@ def fixed_verify(self, sign: str, data: bytes, uid: Union[str, bytes]) -> bool:
     hash_to_verify = sm3.sm3_hash(func.bytes_to_list(message_bytes))
     return original_verify(self, sign, bytes.fromhex(hash_to_verify))
 
-sm2.CryptSM2.verify = fixed_verify 
+sm2.CryptSM2.verify = fixed_verify 
 
 def _extract_hex_from_pem(pem_content: str) -> str:
     """
@@ -72,7 +70,7 @@ def _extract_hex_from_pem(pem_content: str) -> str:
         bit_string_tag_index = der_data.find(b'\x03')
         if bit_string_tag_index == -1:
             raise ValueError("在DER编码中未找到BIT STRING。")
-        public_key_bytes = der_data[-65:] 
+        public_key_bytes = der_data[-65:] 
         return public_key_bytes.hex()
     except Exception as e:
         logger.error(f"解析PEM公钥时发生错误: {e}", exc_info=True)
@@ -88,7 +86,7 @@ class RateLimiter:
         # 设置默认值为禁用流控
         self.enabled: bool = False
         self.global_limit: int = 0
-        self.global_period_seconds: int = 3600 
+        self.global_period_seconds: int = 3600 
         try:
             config_dir = Path(__file__).parent / "rate_limit"
             config_path = config_dir / "rate_limit.bin"
@@ -115,16 +113,16 @@ class RateLimiter:
             signature = sig_path.read_bytes().decode('utf-8').strip()
             public_key_pem = pub_key_path.read_text('utf-8')
             public_key_hex = _extract_hex_from_pem(public_key_pem)
-            
+            
             # 创建 SM2 实例
             sm2_crypt = sm2.CryptSM2(public_key=public_key_hex, private_key='')
-            
+            
             try:
                 # 在验证失败时，使用默认值而不是阻止所有请求
                 if not sm2_crypt.verify(signature, bytes(obfuscated_bytes), uid=signing_uid):
                     self.logger.warning("速率限制配置文件签名验证失败，将使用代码默认值（禁用流控）。")
                     return  # 提前返回，跳过后续处理
-                
+                
                 self.logger.info("速率限制配置文件签名验证成功。")
             except (ValueError, TypeError, IndexError) as e:
                 self.logger.warning(f"签名验证失败：无效的密钥或签名格式，将使用默认值（禁用流控）。错误: {e}")
@@ -145,21 +143,21 @@ class RateLimiter:
                     self.logger.warning("配置文件中缺少 'rate_limiter_hash'，将使用默认值（禁用流控）。")
                     return
 
-                rate_limiter_path = Path(__file__) 
+                rate_limiter_path = Path(__file__) 
                 rate_limiter_content_bytes = rate_limiter_path.read_bytes()
                 actual_hash = hashlib.sha256(rate_limiter_content_bytes.replace(b'\r\n', b'\n')).hexdigest()
 
                 if actual_hash != expected_hash:
                     self.logger.warning("rate_limiter.py 文件完整性校验失败，将使用默认值（禁用流控）。")
                     return
-                
+                
                 self.logger.info("rate_limiter.py 文件完整性校验通过。")
                 if config_data:
                     self.enabled = config_data.get("enabled", self.enabled)
                     self.global_limit = config_data.get("global_limit", self.global_limit)
                     if "global_period_seconds" in config_data:
                         self.global_period_seconds = config_data.get("global_period_seconds", self.global_period_seconds)
-                    elif "global_period" in config_data: 
+                    elif "global_period" in config_data: 
                         period_map = {"second": 1, "minute": 60, "hour": 3600, "day": 86400}
                         self.global_period_seconds = period_map.get(config_data["global_period"], 3600)
                     self.logger.info(f"成功加载并验证了速率限制配置文件。参数: 启用={self.enabled}, 限制={self.global_limit}次/{self.global_period_seconds}秒")
@@ -201,16 +199,16 @@ class RateLimiter:
 
             now = get_now()
             time_since_reset = now - global_state.lastResetTime
-            
+            
             if time_since_reset.total_seconds() >= period_seconds:
                 self.logger.info(f"全局速率限制周期已过，正在重置所有计数器。")
                 await crud.reset_all_rate_limit_states(session)
                 await session.commit()
-                
+                
                 await session.refresh(global_state)
                 await session.refresh(provider_state)
-                
-                time_since_reset = now - global_state.lastResetTime 
+                
+                time_since_reset = now - global_state.lastResetTime 
 
             if global_state.requestCount >= global_limit:
                 retry_after = period_seconds - time_since_reset.total_seconds()
