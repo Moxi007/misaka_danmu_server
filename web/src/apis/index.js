@@ -207,6 +207,16 @@ export const setWebhookDomain = data =>
   api.put('/api/ui/config/webhook_custom_domain', data)
 /** webhook可用服务 */
 export const getWebhookServices = () => api.get('/api/ui/webhooks/available')
+/** 获取webhook设置 */
+export const getWebhookSettings = () => api.get('/api/ui/settings/webhook')
+/** 设置webhook设置 */
+export const setWebhookSettings = data => api.put('/api/ui/settings/webhook', data)
+/** 获取webhook任务列表 */
+export const getWebhookTasks = data => api.get('/api/ui/webhook-tasks', data)
+/** 批量删除webhook任务 */
+export const deleteWebhookTasks = data => api.post('/api/ui/webhook-tasks/delete-bulk', data)
+/** 立即执行webhook任务 */
+export const runWebhookTasksNow = data => api.post('/api/ui/webhook-tasks/run-now', data)
 
 /** ---------------------------------------------- Bangumi  ----------------------------------------------*/
 /** 获取bangumi api配置 */

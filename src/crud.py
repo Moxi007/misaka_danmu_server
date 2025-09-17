@@ -2,7 +2,7 @@ import json
 import logging
 import re
 import secrets
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional, Dict, Any, Type, Tuple
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -17,7 +17,7 @@ from sqlalchemy.sql.elements import ColumnElement
 from . import models
 from . import orm_models
 from .orm_models import ( # noqa: F401
-    Anime, AnimeSource, Episode, User, Scraper, AnimeMetadata, Config, CacheData, ApiToken, TokenAccessLog, UaRule, BangumiAuth, OauthState, AnimeAlias, TmdbEpisodeMapping, ScheduledTask, TaskHistory, MetadataSource, ExternalApiLog
+    Anime, AnimeSource, Episode, User, Scraper, AnimeMetadata, Config, CacheData, ApiToken, TokenAccessLog, UaRule, BangumiAuth, OauthState, AnimeAlias, TmdbEpisodeMapping, ScheduledTask, TaskHistory, MetadataSource, ExternalApiLog, WebhookTask
 , RateLimitState)
 from .config import settings
 from .timezone import get_now
@@ -26,7 +26,7 @@ from .danmaku_parser import parse_dandan_xml_to_comments
 logger = logging.getLogger(__name__)
 
 # --- 新增：文件存储相关常量和辅助函数 ---
-DANMAKU_BASE_DIR = Path(__file__).parent.parent / "config" / "danmaku"
+DANMAKU_BASE_DIR = Path("/app/config/danmaku")
 
 def _generate_xml_from_comments(
     comments: List[Dict[str, Any]], 
@@ -1646,16 +1646,11 @@ async def increment_token_call_count(session: AsyncSession, token_id: int):
     if not token:
         return
 
-    now = get_now()
-    # 如果是新的一天，重置计数器为1
-    if token.lastCallAt is None or token.lastCallAt.date() < now.date():
-        token.dailyCallCount = 1
-    else:
-        # 否则，简单地增加计数
-        token.dailyCallCount += 1
-    
+    # 修正：简化函数职责，现在只负责增加计数。
+    # 重置逻辑已移至 validate_api_token 中，以避免竞争条件。
+    token.dailyCallCount += 1
     # 总是更新最后调用时间
-    token.lastCallAt = now
+    token.lastCallAt = get_now()
     # 注意：这里不 commit，由调用方（API端点）来决定何时提交事务
 
 # --- UA Filter and Log Services ---
@@ -1871,6 +1866,12 @@ async def check_scheduled_task_exists_by_type(session: AsyncSession, job_type: s
     result = await session.execute(stmt)
     return result.scalar_one_or_none() is not None
 
+async def get_scheduled_task_id_by_type(session: AsyncSession, job_type: str) -> Optional[str]:
+    """获取指定类型的定时任务ID。"""
+    stmt = select(ScheduledTask.taskId).where(ScheduledTask.jobType == job_type).limit(1)
+    result = await session.execute(stmt)
+    return result.scalar_one_or_none()
+
 async def get_scheduled_task(session: AsyncSession, task_id: str) -> Optional[Dict[str, Any]]:
     stmt = select(
         ScheduledTask.taskId.label("taskId"), 
@@ -2038,6 +2039,71 @@ async def mark_interrupted_tasks_as_failed(session: AsyncSession) -> int:
     result = await session.execute(stmt)
     await session.commit()
     return result.rowcount
+
+# --- Webhook Tasks ---
+
+async def create_webhook_task(
+    session: AsyncSession,
+    task_title: str,
+    unique_key: str,
+    payload: Dict[str, Any],
+    webhook_source: str,
+    is_delayed: bool,
+    delay: timedelta
+):
+    """创建一个新的待处理 Webhook 任务。"""
+    now = get_now()
+    execute_time = now + delay if is_delayed else now
+
+    try:
+        new_task = WebhookTask(
+            receptionTime=now,
+            executeTime=execute_time,
+            webhookSource=webhook_source,
+            status="pending",
+            payload=json.dumps(payload, ensure_ascii=False),
+            uniqueKey=unique_key,
+            taskTitle=task_title
+        )
+        session.add(new_task)
+        await session.flush() # Flush to check for unique constraint violation
+    except exc.IntegrityError:
+        # 如果 uniqueKey 已存在，则忽略此重复请求
+        await session.rollback()
+        logger.warning(f"检测到重复的 Webhook 请求 (unique_key: {unique_key})，已忽略。")
+
+async def get_webhook_tasks(session: AsyncSession, page: int, page_size: int, search: Optional[str] = None) -> Dict[str, Any]:
+    """获取待处理的 Webhook 任务列表，支持分页。"""
+    base_stmt = select(WebhookTask)
+    if search:
+        base_stmt = base_stmt.where(WebhookTask.taskTitle.like(f"%{search}%"))
+
+    count_stmt = select(func.count()).select_from(base_stmt.alias("count_subquery"))
+    total = (await session.execute(count_stmt)).scalar_one()
+
+    stmt = base_stmt.order_by(WebhookTask.receptionTime.desc()).offset((page - 1) * page_size).limit(page_size)
+    result = await session.execute(stmt)
+    return {"total": total, "list": result.scalars().all()}
+
+async def delete_webhook_tasks(session: AsyncSession, task_ids: List[int]) -> int:
+    """批量删除指定的 Webhook 任务。"""
+    if not task_ids:
+        return 0
+    stmt = delete(WebhookTask).where(WebhookTask.id.in_(task_ids))
+    result = await session.execute(stmt)
+    await session.commit()
+    return result.rowcount
+
+async def get_due_webhook_tasks(session: AsyncSession) -> List[WebhookTask]:
+    """获取所有已到执行时间的待处理任务。"""
+    now = get_now()
+    stmt = select(WebhookTask).where(WebhookTask.status == "pending", WebhookTask.executeTime <= now)
+    result = await session.execute(stmt)
+    return result.scalars().all()
+
+async def update_webhook_task_status(session: AsyncSession, task_id: int, status: str):
+    """更新 Webhook 任务的状态。"""
+    await session.execute(update(WebhookTask).where(WebhookTask.id == task_id).values(status=status))
 
 async def get_last_run_result_for_scheduled_task(session: AsyncSession, scheduled_task_id: str) -> Optional[Dict[str, Any]]:
     """获取指定定时任务的最近一次运行结果。"""

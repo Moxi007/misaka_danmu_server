@@ -17,18 +17,19 @@ from .metadata_manager import MetadataSourceManager
 logger = logging.getLogger(__name__)
 
 class WebhookManager:
-    def __init__(self, session_factory: async_sessionmaker[AsyncSession], task_manager: TaskManager, scraper_manager: ScraperManager, rate_limiter: RateLimiter, metadata_manager: MetadataSourceManager):
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession], task_manager: TaskManager, scraper_manager: ScraperManager, rate_limiter: RateLimiter, metadata_manager: MetadataSourceManager, config_manager: ConfigManager):
         self._session_factory = session_factory
         self.task_manager = task_manager
         self.scraper_manager = scraper_manager
         self.rate_limiter = rate_limiter
         self.metadata_manager = metadata_manager
+        self.config_manager = config_manager
         self._handlers: Dict[str, Type[BaseWebhook]] = {}
         self._load_handlers()
 
     def _load_handlers(self):
         """动态发现并加载 'webhook' 目录下的所有处理器，使用文件名作为类型。"""
-        webhook_package_path = [str(Path(__file__).parent / "webhook")]
+        webhook_package_path = [str(Path("/app/src/webhook"))]
         for finder, name, ispkg in pkgutil.iter_modules(webhook_package_path):
             if name.startswith("_") or name == "base":
                 continue
@@ -50,7 +51,7 @@ class WebhookManager:
         handler_class = self._handlers.get(webhook_type)
         if not handler_class:
             raise ValueError(f"未找到类型为 '{webhook_type}' 的 Webhook 处理器")
-        return handler_class(self._session_factory, self.task_manager, self.scraper_manager, self.rate_limiter, self.metadata_manager)
+        return handler_class(self._session_factory, self.task_manager, self.scraper_manager, self.rate_limiter, self.metadata_manager, self.config_manager)
 
     def get_available_handlers(self) -> List[str]:
         """返回所有成功加载的 webhook 处理器类型（即文件名）的列表。"""

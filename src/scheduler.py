@@ -16,10 +16,12 @@ from apscheduler.triggers.cron import CronTrigger
 from . import crud
 from .rate_limiter import RateLimiter
 from .jobs.base import BaseJob
+from .jobs.webhook_processor import WebhookProcessorJob
 from .timezone import get_app_timezone
 from .task_manager import TaskManager
 from .scraper_manager import ScraperManager
 from .metadata_manager import MetadataSourceManager
+from .config_manager import ConfigManager
 
 logger = logging.getLogger(__name__)
 
@@ -49,12 +51,13 @@ def cron_is_valid(cron: str, min_hours: int) -> bool:
 # --- Scheduler Manager ---
 
 class SchedulerManager:
-    def __init__(self, session_factory: async_sessionmaker[AsyncSession], task_manager: TaskManager, scraper_manager: ScraperManager, rate_limiter: RateLimiter, metadata_manager: MetadataSourceManager):
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession], task_manager: TaskManager, scraper_manager: ScraperManager, rate_limiter: RateLimiter, metadata_manager: MetadataSourceManager, config_manager: ConfigManager):
         self._session_factory = session_factory
         self.task_manager = task_manager
         self.scraper_manager = scraper_manager
         self.rate_limiter = rate_limiter
         self.metadata_manager = metadata_manager
+        self.config_manager = config_manager
         self.scheduler = AsyncIOScheduler(timezone=str(get_app_timezone()))
         self._job_classes: Dict[str, Type[BaseJob]] = {}
 
@@ -62,7 +65,7 @@ class SchedulerManager:
         """
         动态发现并加载 'jobs' 目录下的所有任务类。
         """
-        jobs_package_path = [str(Path(__file__).parent / "jobs")]
+        jobs_package_path = [str(Path("/app/src/jobs"))]
         for finder, name, ispkg in pkgutil.iter_modules(jobs_package_path):
             if name.startswith("_") or name == "base":
                 continue
@@ -98,6 +101,7 @@ class SchedulerManager:
                 "scraper_manager": self.scraper_manager,
                 "rate_limiter": self.rate_limiter,
                 "metadata_manager": self.metadata_manager,
+                "config_manager": self.config_manager,
             }
             
             args_to_pass = {name: dep for name, dep in dependencies.items() if name in init_params}
@@ -183,6 +187,12 @@ class SchedulerManager:
                 if exists:
                     raise ValueError("“TMDB自动映射与更新”任务已存在，无法重复创建。")
 
+            # 新增：确保 Webhook 处理器任务只能创建一个
+            if job_type == "webhookProcessor":
+                exists = await crud.check_scheduled_task_exists_by_type(session, "webhookProcessor")
+                if exists:
+                    raise ValueError("“Webhook 延时任务处理器”已存在，无法重复创建。")
+
             task_id = str(uuid4())
             await crud.create_scheduled_task(session, task_id, name, job_type, cron, is_enabled)
             runner = self._create_job_runner(job_type, task_id)
@@ -223,3 +233,15 @@ class SchedulerManager:
             job.modify(next_run_time=datetime.now(self.scheduler.timezone))
         else:
             raise ValueError("找不到指定的任务ID")
+
+    async def run_task_now_by_type(self, job_type: str):
+        """
+        根据任务类型查找任务并立即运行它。
+        """
+        async with self._session_factory() as session:
+            task_id = await crud.get_scheduled_task_id_by_type(session, job_type)
+        
+        if not task_id:
+            raise ValueError(f"找不到类型为 '{job_type}' 的定时任务")
+
+        await self.run_task_now(task_id)    

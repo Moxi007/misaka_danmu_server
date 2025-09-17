@@ -7,6 +7,7 @@ from typing import Any, Callable, Coroutine, Dict, List, Tuple, Optional # Add H
 from uuid import uuid4, UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from .config_manager import ConfigManager
 
 from . import models, crud
 
@@ -39,7 +40,7 @@ class Task:
         self.pause_event.set() # 默认为运行状态 (事件被设置)
 
 class TaskManager:
-    def __init__(self, session_factory: async_sessionmaker[AsyncSession]):
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession], config_manager: ConfigManager):
         self._session_factory = session_factory
         self._queue: asyncio.Queue = asyncio.Queue()
         self._worker_task: asyncio.Task | None = None
@@ -47,6 +48,7 @@ class TaskManager:
         self._pending_titles: set[str] = set()
         self._active_unique_keys: set[str] = set()
         self._lock = asyncio.Lock()
+        self.config_manager = config_manager
         self.logger = logging.getLogger(self.__class__.__name__)
 
     def start(self):

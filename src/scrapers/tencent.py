@@ -186,20 +186,15 @@ class TencentScraper(BaseScraper):
     referer = "https://v.qq.com/"
     test_url = "https://v.qq.com"
     # 基于JS参考实现，提供一个更通用和全面的分集黑名单。
-    # 使用 re.escape 来确保特殊字符被正确处理。
-    _PROVIDER_SPECIFIC_BLACKLIST_DEFAULT = r"|".join(re.escape(keyword) for keyword in [
-        "拍摄花絮", "制作花絮", "幕后花絮", "未播花絮", "独家花絮", "花絮特辑",
-        "预告片", "先导预告", "终极预告", "正式预告", "官方预告",
-        "彩蛋片段", "删减片段", "未播片段", "番外彩蛋",
-        "精彩片段", "精彩看点", "精彩回顾", "精彩集锦", "看点解析", "看点预告",
-        "NG镜头", "NG花絮", "番外篇", "番外特辑",
-        "制作特辑", "拍摄特辑", "幕后特辑", "导演特辑", "演员特辑",
-        "片尾曲", "插曲", "主题曲", "背景音乐", "OST", "音乐MV", "歌曲MV",
-        "前季回顾", "剧情回顾", "往期回顾", "内容总结", "剧情盘点", "精选合集", "剪辑合集", "混剪视频",
-        "独家专访", "演员访谈", "导演访谈", "主创访谈", "媒体采访", "发布会采访",
-        "抢先看", "抢先版", "试看版", "短剧", "vlog", "纯享", "加更", "reaction",
-        "精编", "会员版", "Plus", "独家版", "特别版", "短片", "合唱"
-    ])
+    # 修正：使用一个更简洁且高效的正则表达式，而不是对每个关键词进行 re.escape。
+    # 这提高了可读性，并允许使用正则表达式的特性（如 `|`）。
+    _PROVIDER_SPECIFIC_BLACKLIST_DEFAULT = (
+        r"^(.*?)(vlog|reaction|纯享|加更|抢先|预告|花絮|特辑|彩蛋|专访|幕后|直播|未播|衍生|番外|会员|片花|精华|看点|速看|解读|影评|解说|吐槽|盘点|"
+        r"拍摄花絮|制作花絮|幕后花絮|未播花絮|独家花絮|花絮特辑|先导预告|终极预告|正式预告|官方预告|彩蛋片段|删减片段|未播片段|番外彩蛋|"
+        r"精彩片段|精彩看点|精彩回顾|精彩集锦|看点解析|看点预告|NG镜头|NG花絮|番外篇|番外特辑|制作特辑|拍摄特辑|幕后特辑|导演特辑|演员特辑|"
+        r"片尾曲|插曲|主题曲|背景音乐|OST|音乐MV|歌曲MV|前季回顾|剧情回顾|往期回顾|内容总结|剧情盘点|精选合集|剪辑合集|混剪视频|"
+        r"独家专访|演员访谈|导演访谈|主创访谈|媒体采访|发布会采访|抢先看|抢先版|试看版|短剧|精编|会员版|Plus|独家版|特别版|短片|合唱)(.*?)$"
+    )
 
     def __init__(self, session_factory: async_sessionmaker[AsyncSession], config_manager: ConfigManager):
         super().__init__(session_factory, config_manager)
@@ -1008,48 +1003,49 @@ class TencentScraper(BaseScraper):
             episodes_to_format = sorted_episodes
         else:
             # 步骤 2a: 判断是否为综艺节目 (仅当不是电影时)
+            # 修正：增加对日期格式的判断，以更准确地识别综艺节目
             if db_media_type == 'tv_series' or not db_media_type: # 如果类型未知，也进行猜测
-                # 如果标题中普遍包含“期”字，则认为是综艺
                 qi_count = sum(1 for ep in pre_filtered if "期" in (ep.union_title or ep.title or ""))
-                if pre_filtered and qi_count > len(pre_filtered) / 2:
+                date_count = sum(1 for ep in pre_filtered if re.search(r'\d{4}-\d{2}-\d{2}', ep.union_title or ep.title or ""))
+                if pre_filtered and (qi_count > len(pre_filtered) / 3 or date_count > len(pre_filtered) / 3):
                     is_variety_show = True
             
             # 步骤 2b: 根据类型进行处理
             if is_variety_show:
                 self.logger.info("检测到综艺节目，正在应用特殊排序和过滤规则...")
                 
-                # 检查是否存在 "第N期" 格式
-                has_qi_format = any(re.search(r'第\d+期', ep.union_title or ep.title or "") for ep in pre_filtered)
-                
                 episode_infos = []
                 for ep in pre_filtered:
                     title = ep.union_title or ep.title or ""
-                    
-                    if has_qi_format: # 如果是按“期”的综艺
-                        qi_updown_match = re.search(r'第(\d+)期([上下])', title, re.IGNORECASE) # 匹配“第N期上/下”
-                        if qi_updown_match:
-                            episode_infos.append({'ep': ep, 'qi_num': int(qi_updown_match.group(1)), 'part': qi_updown_match.group(2)})
-                        elif qi_match := re.search(r'第(\d+)期', title): # 匹配“第N期”
-                            episode_infos.append({'ep': ep, 'qi_num': int(qi_match.group(1)), 'part': ''})
+                    qi_match = re.search(r'第(\d+)期', title)
+                    date_match = re.search(r'(\d{4}-\d{2}-\d{2})', title)
+                    part_match = re.search(r'([上下])$', title)
+
+                    if qi_match:
+                        episode_infos.append({'ep': ep, 'type': 'qi', 'num': int(qi_match.group(1)), 'part': part_match.group(1) if part_match else ''})
+                    elif date_match:
+                        episode_infos.append({'ep': ep, 'type': 'date', 'num': date_match.group(1), 'part': part_match.group(1) if part_match else ''})
                     else:
-                        # 如果没有"第N期"格式，则保留所有非广告内容
-                        if "广告" not in title and "推广" not in title:
-                            episode_infos.append({'ep': ep, 'qi_num': 0, 'part': ''})
+                        # 对于无法解析出期数或日期的，标记为 'other'
+                        episode_infos.append({'ep': ep, 'type': 'other', 'num': 0, 'part': ''})
 
                 # 排序
                 def sort_key_variety(e: Dict) -> Tuple:
                     part_order = {'上': 1, '': 2, '下': 3}
-                    if e['qi_num'] == 0:
-                        return (float('inf'), e['ep'].union_title or e['ep'].title or "")
-                    return (e['qi_num'], part_order.get(e['part'], 99))
+                    if e['type'] == 'qi':
+                        return (1, e['num'], part_order.get(e['part'], 99))
+                    elif e['type'] == 'date':
+                        return (2, e['num'], part_order.get(e['part'], 99))
+                    else: # 'other'
+                        return (3, 0, 0) # 所有其他类型排在最后
                 
                 episode_infos.sort(key=sort_key_variety)
                 
                 # URL去重，选择最佳标题
                 url_to_episodes: Dict[str, List[Dict]] = defaultdict(list)
                 for info in episode_infos:
-                    url = f"https://v.qq.com/x/cover/{cid}/{info['ep'].vid}.html"
-                    url_to_episodes[url].append(info)
+                    # 使用 vid 作为唯一键进行去重
+                    url_to_episodes[info['ep'].vid].append(info)
 
                 final_ep_infos = []
                 for url, infos in url_to_episodes.items():
@@ -1124,7 +1120,10 @@ class TencentScraper(BaseScraper):
                     final_filtered_episodes.append(ep)
 
             for rule, titles in secondary_filtered_out_log.items():
-                self.logger.info(f"Tencent: 二次过滤，根据黑名单规则 '{rule}' 过滤掉了 {len(titles)} 个分集: {', '.join(titles)}")
+                if titles:
+                    log_message = f"Tencent: 二次过滤，根据黑名单规则 '{rule}' 过滤掉了 {len(titles)} 个分集:\n"
+                    log_message += "\n".join([f"  - {title}" for title in titles])
+                    self.logger.info(log_message)
             
             episodes_to_format = final_filtered_episodes
 

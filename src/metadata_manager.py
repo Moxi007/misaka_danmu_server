@@ -86,7 +86,7 @@ class MetadataSourceManager:
 
         discovered_providers = []
         
-        sources_package_path = [str(Path(__file__).parent / "metadata_sources")]
+        sources_package_path = [str(Path("/app/src/metadata_sources"))]
         for finder, name, ispkg in pkgutil.iter_modules(sources_package_path):
             if name.startswith("_") or name == "base":
                 continue

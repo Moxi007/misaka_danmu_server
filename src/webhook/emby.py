@@ -4,12 +4,11 @@ from fastapi import Request, HTTPException, status
 
 from .base import BaseWebhook
 from ..scraper_manager import ScraperManager
-from .tasks import webhook_search_and_dispatch_task
 
 logger = logging.getLogger(__name__)
 
 class EmbyWebhook(BaseWebhook):
-    async def handle(self, request: Request):
+    async def handle(self, request: Request, webhook_source: str):
         # 处理器现在负责解析请求体。
         # Emby 通常发送 application/json。
         try:
@@ -82,25 +81,18 @@ class EmbyWebhook(BaseWebhook):
         unique_key = f"webhook-search-{anime_title}-S{season_number}-E{episode_number}"
         logger.info(f"Webhook: 准备为 '{anime_title}' 创建全网搜索任务，并附加元数据ID (TMDB: {tmdb_id}, IMDb: {imdb_id}, TVDB: {tvdb_id}, Douban: {douban_id})。")
 
-        # 使用新的、专门的 webhook 任务
-        task_coro = lambda session, callback: webhook_search_and_dispatch_task(
-            animeTitle=anime_title,
-            mediaType=media_type,
-            season=season_number,
-            currentEpisodeIndex=episode_number,
-            year=year,
-            searchKeyword=search_keyword,
-            doubanId=str(douban_id) if douban_id else None,
-            tmdbId=str(tmdb_id) if tmdb_id else None,
-            imdbId=str(imdb_id) if imdb_id else None,
-            tvdbId=str(tvdb_id) if tvdb_id else None,
-            bangumiId=str(bangumi_id) if bangumi_id else None,
-            webhookSource='emby',
-            progress_callback=callback,
-            session=session,
-            metadata_manager=self.metadata_manager,
-            manager=self.scraper_manager, # type: ignore
-            task_manager=self.task_manager,
-            rate_limiter=self.rate_limiter
+        # 将所有需要的信息打包成 payload
+        task_payload = {
+            "animeTitle": anime_title, "mediaType": media_type, "season": season_number,
+            "currentEpisodeIndex": episode_number, "year": year, "searchKeyword": search_keyword,
+            "doubanId": str(douban_id) if douban_id else None,
+            "tmdbId": str(tmdb_id) if tmdb_id else None,
+            "imdbId": str(imdb_id) if imdb_id else None,
+            "tvdbId": str(tvdb_id) if tvdb_id else None,
+            "bangumiId": str(bangumi_id) if bangumi_id else None,
+        }
+
+        await self.dispatch_task(
+            task_title=task_title, unique_key=unique_key,
+            payload=task_payload, webhook_source=webhook_source
         )
-        await self.task_manager.submit_task(task_coro, task_title, unique_key=unique_key)

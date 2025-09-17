@@ -55,13 +55,14 @@ class TvdbMetadataSource(BaseMetadataSource):
 
     async def _create_client(self) -> httpx.AsyncClient:
         # 1. 获取代理配置
-        proxy_url = await self.config_manager.get("proxy_url", "")
-        proxy_enabled_globally = (await self.config_manager.get("proxy_enabled", "false")).lower() == 'true'
-
         async with self._session_factory() as session:
+            proxy_url = await crud.get_config_value(session, "proxyUrl", "")
+            proxy_enabled_str = await crud.get_config_value(session, "proxyEnabled", "false")
+            proxy_enabled_globally = proxy_enabled_str.lower() == 'true'
             metadata_settings = await crud.get_all_metadata_source_settings(session)
         provider_setting = next((s for s in metadata_settings if s['providerName'] == self.provider_name), None)
         use_proxy_for_this_provider = provider_setting.get('use_proxy', False) if provider_setting else False
+
         proxy_to_use = proxy_url if proxy_enabled_globally and use_proxy_for_this_provider and proxy_url else None
 
         # 2. 创建一个基础客户端用于登录
@@ -164,8 +165,8 @@ class TvdbMetadataSource(BaseMetadataSource):
             api_key = await self.config_manager.get("tvdbApiKey")
             if not api_key:
                 return "未配置API Key"
-            proxy_url = await self.config_manager.get("proxy_url", "")
-            proxy_enabled_globally = (await self.config_manager.get("proxy_enabled", "false")).lower() == 'true'
+            proxy_url = await self.config_manager.get("proxyUrl", "")
+            proxy_enabled_globally = (await self.config_manager.get("proxyEnabled", "false")).lower() == 'true'
             async with self._session_factory() as session:
                 metadata_settings = await crud.get_all_metadata_source_settings(session)
             provider_setting = next((s for s in metadata_settings if s['providerName'] == self.provider_name), None)

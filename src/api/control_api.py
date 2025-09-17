@@ -328,6 +328,7 @@ async def auto_import(
     manager: ScraperManager = Depends(get_scraper_manager),
     metadata_manager: MetadataSourceManager = Depends(get_metadata_manager),
     rate_limiter: RateLimiter = Depends(get_rate_limiter),
+    config_manager: ConfigManager = Depends(get_config_manager),
     api_key: str = Depends(verify_api_key)
 ):
     """
@@ -416,7 +417,7 @@ async def auto_import(
 
     try:
         task_coro = lambda session, cb: tasks.auto_search_and_import_task(
-            payload, cb, session, manager, metadata_manager, task_manager,
+            payload, cb, session, config_manager, manager, metadata_manager, task_manager,
             rate_limiter=rate_limiter,
             api_key=api_key
         )
@@ -664,6 +665,7 @@ async def edited_import(
     task_manager: TaskManager = Depends(get_task_manager),
     manager: ScraperManager = Depends(get_scraper_manager),
     rate_limiter: RateLimiter = Depends(get_rate_limiter),
+    config_manager: ConfigManager = Depends(get_config_manager),
     metadata_manager: MetadataSourceManager = Depends(get_metadata_manager)
 ):
     """
@@ -728,7 +730,7 @@ async def edited_import(
     try:
         task_coro = lambda session, cb: tasks.edited_import_task(
             request_data=task_payload, progress_callback=cb, session=session,
-            manager=manager, rate_limiter=rate_limiter,
+            config_manager=config_manager, manager=manager, rate_limiter=rate_limiter,
             metadata_manager=metadata_manager
         )
         task_id, _ = await task_manager.submit_task(task_coro, task_title, unique_key=unique_key)

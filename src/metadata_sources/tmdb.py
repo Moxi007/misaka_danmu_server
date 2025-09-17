@@ -25,8 +25,8 @@ def _clean_movie_title(title: Optional[str]) -> Optional[str]:
 
 async def _get_proxy_for_tmdb(config_manager: ConfigManager, session_factory: async_sessionmaker[AsyncSession]) -> Optional[str]:
     """Helper to determine if a proxy should be used for TMDB."""
-    proxy_url = await config_manager.get("proxy_url", "")
-    proxy_enabled_globally = (await config_manager.get("proxy_enabled", "false")).lower() == 'true'
+    proxy_url = await config_manager.get("proxyUrl", "")
+    proxy_enabled_globally = (await config_manager.get("proxyEnabled", "false")).lower() == 'true'
     if not proxy_enabled_globally or not proxy_url:
         return None
     

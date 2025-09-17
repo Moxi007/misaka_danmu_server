@@ -41,8 +41,8 @@ class DoubanMetadataSource(BaseMetadataSource): # type: ignore
         if cookie:
             headers["Cookie"] = cookie
 
-        proxy_url = await self.config_manager.get("proxy_url", "")
-        proxy_enabled_globally = (await self.config_manager.get("proxy_enabled", "false")).lower() == 'true'
+        proxy_url = await self.config_manager.get("proxyUrl", "")
+        proxy_enabled_globally = (await self.config_manager.get("proxyEnabled", "false")).lower() == 'true'
 
         async with self._session_factory() as session:
             metadata_settings = await crud.get_all_metadata_source_settings(session)
@@ -155,8 +155,8 @@ class DoubanMetadataSource(BaseMetadataSource): # type: ignore
     async def check_connectivity(self) -> str:
         try:
             # 修正：在创建客户端之前就确定是否使用代理，以避免AttributeError
-            proxy_url = await self.config_manager.get("proxy_url", "")
-            proxy_enabled_globally = (await self.config_manager.get("proxy_enabled", "false")).lower() == 'true'
+            proxy_url = await self.config_manager.get("proxyUrl", "")
+            proxy_enabled_globally = (await self.config_manager.get("proxyEnabled", "false")).lower() == 'true'
             async with self._session_factory() as session:
                 metadata_settings = await crud.get_all_metadata_source_settings(session)
             provider_setting = next((s for s in metadata_settings if s['providerName'] == self.provider_name), None)

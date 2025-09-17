@@ -46,7 +46,7 @@ class YamlConfigSettingsSource(PydanticBaseSettingsSource):
     def __init__(self, settings_cls: type[BaseSettings]):
         super().__init__(settings_cls)
         # 在项目根目录的 config/ 文件夹下查找 config.yml
-        self.yaml_file = Path(__file__).parent.parent / "config" / "config.yml"
+        self.yaml_file = Path("/app/config/config.yml")
 
     def get_field_value(self, field, field_name):
         return None, None, False

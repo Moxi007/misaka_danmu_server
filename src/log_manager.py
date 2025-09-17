@@ -69,7 +69,7 @@ def setup_logging():
     以及一个用于API的内存双端队列。
     此函数应在应用启动时被调用一次。
     """
-    log_dir = Path(__file__).parent.parent / "config" / "logs"
+    log_dir = Path("/app/config/logs")
     log_dir.mkdir(parents=True, exist_ok=True)
     log_file = log_dir / "app.log"
 
@@ -138,6 +138,29 @@ def setup_logging():
     ))
     scraper_logger.addHandler(scraper_handler)
     logging.info("专用的搜索源响应日志已初始化，将输出到 %s", scraper_log_file)
+
+    # --- 新增：为 Webhook 原始请求设置一个专用的日志记录器 ---
+    webhook_log_file = log_dir / "webhook_raw.log"
+
+    if webhook_log_file.exists():
+        try:
+            with open(webhook_log_file, 'w', encoding='utf-8') as f:
+                f.truncate(0)
+            logging.info(f"已清空旧的 Webhook 原始请求日志: {webhook_log_file}")
+        except IOError as e:
+            logging.error(f"清空 Webhook 原始请求日志失败: {e}")
+
+    webhook_logger = logging.getLogger("webhook_raw")
+    webhook_logger.setLevel(logging.INFO) # 只记录 INFO 级别及以上的日志
+    webhook_logger.propagate = False # 防止日志冒泡到根记录器
+
+    webhook_handler = logging.handlers.RotatingFileHandler(
+        webhook_log_file, maxBytes=5*1024*1024, backupCount=3, encoding='utf-8'
+    )
+    # 为这个日志使用一个非常简洁的格式，只包含时间和消息
+    webhook_handler.setFormatter(logging.Formatter('[%(asctime)s] %(message)s', datefmt='%Y-%m-%d %H:%M:%S'))
+    webhook_logger.addHandler(webhook_handler)
+    logging.info("专用的 Webhook 原始请求日志已初始化，将输出到 %s", webhook_log_file)
 
 def get_logs() -> List[str]:
     """返回为API存储的所有日志条目列表。"""

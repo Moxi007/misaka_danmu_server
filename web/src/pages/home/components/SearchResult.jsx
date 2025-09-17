@@ -107,7 +107,8 @@ export const SearchResult = () => {
     })
   )
 
-  const searchSeason = lastSearchResultData?.season
+  const searchSeason = lastSearchResultData?.search_season
+  const searchEpisode = lastSearchResultData?.search_episode
 
   const [loading, setLoading] = useState(false)
 
@@ -621,6 +622,11 @@ export const SearchResult = () => {
                               <Tag color="gold">
                                 总集数：{item.episodeCount ?? 0}
                               </Tag>
+                              {searchEpisode && (
+                                <Tag color="cyan">
+                                  单集获取：{searchEpisode}
+                                </Tag>
+                              )}
                             </div>
                           </div>
                         </div>

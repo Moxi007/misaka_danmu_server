@@ -230,6 +230,19 @@ class ScheduledTask(Base):
     lastRunAt: Mapped[Optional[datetime]] = mapped_column("last_run_at", NaiveDateTime)
     nextRunAt: Mapped[Optional[datetime]] = mapped_column("next_run_at", NaiveDateTime)
 
+class WebhookTask(Base):
+    __tablename__ = "webhook_tasks"
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    receptionTime: Mapped[datetime] = mapped_column("reception_time", NaiveDateTime, index=True)
+    executeTime: Mapped[datetime] = mapped_column("execute_time", NaiveDateTime, index=True)
+    webhookSource: Mapped[str] = mapped_column("webhook_source", String(50))
+    status: Mapped[str] = mapped_column(String(50), default="pending", index=True) # pending, processing, failed, submitted
+    payload: Mapped[str] = mapped_column(TEXT().with_variant(MEDIUMTEXT, "mysql"))
+    uniqueKey: Mapped[str] = mapped_column("unique_key", String(255), unique=True)
+    taskTitle: Mapped[str] = mapped_column("task_title", String(255))
+
+    __table_args__ = (Index('idx_status_execute_time', 'status', 'execute_time'),)
+
 class TaskHistory(Base):
     __tablename__ = "task_history"
     # 修正：将Python属性名从 'id' 改为 'taskId'，以匹配Pydantic模型，同时保持数据库列名为 'id'

@@ -12,7 +12,7 @@ from .scraper_manager import ScraperManager
 logger = logging.getLogger(__name__)
 
 # 图片存储在 config/image/ 目录下
-IMAGE_DIR = Path(__file__).parent.parent / "config" / "image"
+IMAGE_DIR = Path("/app/config/image")
 IMAGE_DIR.mkdir(parents=True, exist_ok=True)
 
 async def download_image(image_url: Optional[str], session: AsyncSession, scraper_manager: ScraperManager, provider_name: Optional[str] = None) -> Optional[str]:

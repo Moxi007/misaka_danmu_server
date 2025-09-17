@@ -148,10 +148,14 @@ async def _migrate_add_unique_key_to_task_history_task(conn: AsyncConnection, db
         add_column_sql = text("ALTER TABLE task_history ADD COLUMN `unique_key` VARCHAR(255) NULL, ADD INDEX `idx_unique_key` (`unique_key`)")
     else: # postgresql
         check_column_sql = text("SELECT 1 FROM information_schema.columns WHERE table_name = 'task_history' AND column_name = 'unique_key'")
-        add_column_sql = text('ALTER TABLE task_history ADD COLUMN "unique_key" VARCHAR(255) NULL; CREATE INDEX IF NOT EXISTS idx_task_history_unique_key ON task_history (unique_key);')
+        add_column_sql = text('ALTER TABLE task_history ADD COLUMN "unique_key" VARCHAR(255) NULL')
+        add_index_sql = text('CREATE INDEX IF NOT EXISTS idx_task_history_unique_key ON task_history (unique_key)')
 
     if not (await conn.execute(check_column_sql)).scalar_one_or_none():
         await conn.execute(add_column_sql)
+        # 仅当数据库是 PostgreSQL 时，才单独执行创建索引的语句
+        if db_type == "postgresql":
+            await conn.execute(add_index_sql)
 
 async def _migrate_api_token_to_daily_limit_task(conn: AsyncConnection, db_type: str):
     """迁移任务: 将 api_tokens 表的调用限制升级为每日限制。"""

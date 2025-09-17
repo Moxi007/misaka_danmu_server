@@ -500,11 +500,13 @@ class YoukuScraper(BaseScraper):
         确保获取弹幕签名所需的 cna 和 _m_h5_tk cookie。
         此逻辑严格参考了 C# 代码，并针对网络环境进行了优化。
         """
+        # 修正：在函数开头就确保客户端已初始化，以防止在后续代码中对 NoneType 对象进行操作。
+        client = await self._ensure_client()
+
         # 步骤 1: 获取 'cna' cookie。它通常由优酷主站或其统计服务设置。
         # 我们优先访问主站，因为它更不容易出网络问题。
-        cna_val = self.client.cookies.get("cna")
+        cna_val = client.cookies.get("cna")
         if not cna_val or force_refresh:
-            client = await self._ensure_client()
             try:
                 log_msg = "强制刷新 'cna' cookie..." if force_refresh else "'cna' cookie 未找到, 正在访问 youku.com 以获取..."
                 self.logger.debug(f"Youku: {log_msg}")
@@ -515,14 +517,13 @@ class YoukuScraper(BaseScraper):
         self._cna = cna_val or ""
 
         # 步骤 2: 获取 '_m_h5_tk' 令牌, 此请求可能依赖于 'cna' cookie 的存在。
-        token_val = self.client.cookies.get("_m_h5_tk")
+        token_val = client.cookies.get("_m_h5_tk")
         if not token_val or force_refresh:
-            client = await self._ensure_client()
             try:
                 log_msg = "强制刷新 '_m_h5_tk' cookie..." if force_refresh else "'_m_h5_tk' cookie 未找到, 正在从 acs.youku.com 请求..."
                 self.logger.debug(f"Youku: {log_msg}")
                 await client.get("https://acs.youku.com/h5/mtop.com.youku.aplatform.weakget/1.0/?jsv=2.5.1&appKey=24679788")
-                token_val = self.client.cookies.get("_m_h5_tk")
+                token_val = client.cookies.get("_m_h5_tk")
             except httpx.ConnectError as e:
                 self.logger.error(f"Youku: 无法连接到 acs.youku.com 获取令牌 cookie。弹幕获取很可能会失败。错误: {e}")
         

@@ -63,6 +63,12 @@ async def lifespan(app: FastAPI):
         'customApiDomain': ('', '用于拼接弹幕API地址的自定义域名。'),
         'webhookApiKey': ('', '用于Webhook调用的安全密钥。'),
         'trustedProxies': ('', '受信任的反向代理IP列表，用逗号分隔。当请求来自这些IP时，将从 X-Forwarded-For 或 X-Real-IP 头中解析真实客户端IP。'),
+        'webhookEnabled': ('true', '是否全局启用 Webhook 功能。'),
+        'webhookDelayedImportEnabled': ('false', '是否为 Webhook 触发的导入启用延时。'),
+        'webhookDelayedImportHours': ('24', 'Webhook 延时导入的小时数。'),
+        'webhookFilterMode': ('blacklist', 'Webhook 标题过滤模式 (blacklist/whitelist)。'),
+        'webhookFilterRegex': ('', '用于过滤 Webhook 标题的正则表达式。'),
+        'webhookLogRawRequest': ('false', '是否记录 Webhook 的原始请求体。'),
         'externalApiKey': ('', '用于外部API调用的安全密钥。'),
         'externalApiDuplicateTaskThresholdHours': (3, '（外部API）重复任务提交阈值（小时）。在此时长内，不允许为同一媒体提交重复的自动导入任务。0为禁用。'),
         'webhookCustomDomain': ('', '用于拼接Webhook URL的自定义域名。'),
@@ -115,14 +121,14 @@ async def lifespan(app: FastAPI):
 
 
 
-    app.state.task_manager = TaskManager(session_factory)
+    app.state.task_manager = TaskManager(session_factory, app.state.config_manager)
     app.state.webhook_manager = WebhookManager(
-        session_factory, app.state.task_manager, app.state.scraper_manager, app.state.rate_limiter, app.state.metadata_manager
+        session_factory, app.state.task_manager, app.state.scraper_manager, app.state.rate_limiter, app.state.metadata_manager, app.state.config_manager
     )
     app.state.task_manager.start()
     await create_initial_admin_user(app)
     app.state.cleanup_task = asyncio.create_task(cleanup_task(app))
-    app.state.scheduler_manager = SchedulerManager(session_factory, app.state.task_manager, app.state.scraper_manager, app.state.rate_limiter, app.state.metadata_manager)
+    app.state.scheduler_manager = SchedulerManager(session_factory, app.state.task_manager, app.state.scraper_manager, app.state.rate_limiter, app.state.metadata_manager, app.state.config_manager)
     await app.state.scheduler_manager.start()
     
     # --- 前端服务 (生产环境) ---
@@ -292,8 +298,8 @@ app.include_router(dandan_router, prefix="/api/v1", tags=["DanDanPlay Compatible
 app.include_router(api_router, prefix="/api")
 
 # --- 新增：挂载 Swagger UI 的静态文件目录 ---
-# 修正：使用绝对路径以确保无论从哪里运行都能找到静态文件目录
-STATIC_DIR = Path(__file__).resolve().parent.parent / "static" / "swagger-ui"
+# 修正：使用相对于工作目录 /app 的绝对路径，使其不再受 __file__ 路径影响
+STATIC_DIR = Path("/app/static/swagger-ui")
 app.mount("/static/swagger-ui", StaticFiles(directory=STATIC_DIR), name="swagger-ui-static")
 
 # 添加一个运行入口，以便直接从配置启动

@@ -52,7 +52,7 @@ class ScraperManager:
     def _load_public_key(self):
         """从 src/public_key.pem 加载公钥。"""
         # 公钥是应用代码的一部分，而不是用户配置。
-        key_path = Path(__file__).parent / "public_key.pem"
+        key_path = Path("/app/src/public_key.pem")
         if not key_path.exists():
             logging.getLogger(__name__).warning("公钥文件 'src/public_key.pem' 未找到。所有搜索源都将无法通过验证。")
             self._public_key = None
@@ -85,7 +85,7 @@ class ScraperManager:
 
         # 使用 pkgutil 发现模块，这对于 .py, .pyc, .so 文件都有效。
         # 我们需要同时处理源码和编译后的情况。
-        scrapers_dir = Path(__file__).parent / "scrapers"
+        scrapers_dir = Path("/app/src/scrapers")
         for file_path in scrapers_dir.iterdir():
             # 我们只关心 .py 文件或已知的二进制扩展名
             if not (file_path.name.endswith(".py") or file_path.name.endswith(".so") or file_path.name.endswith(".pyd")):
