@@ -83,8 +83,8 @@ class RateLimiter:
         self.logger = logging.getLogger(self.__class__.__name__)
         self._verification_failed: bool = False
 
-        self.enabled: bool = True
-        self.global_limit: int = 50
+        self.enabled: bool = False
+        self.global_limit: int = 0
         self.global_period_seconds: int = 3600 
         try:
             config_dir = Path("/app/src/rate_limit")
