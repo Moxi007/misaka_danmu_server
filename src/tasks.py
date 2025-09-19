@@ -182,7 +182,9 @@ async def delete_anime_task(animeId: int, session: AsyncSession, progress_callba
             await progress_callback(0, f"开始删除 (尝试 {attempt + 1}/{max_retries})...")
             
             # 检查作品是否存在
-            anime_exists = await session.get(orm_models.Anime, animeId)
+            anime_stmt = select(orm_models.Anime).where(orm_models.Anime.id == animeId)
+            anime_result = await session.execute(anime_stmt)
+            anime_exists = anime_result.scalar_one_or_none()
             if not anime_exists:
                 raise TaskSuccess("作品未找到，无需删除。")
 
@@ -222,7 +224,9 @@ async def delete_source_task(sourceId: int, session: AsyncSession, progress_call
     await progress_callback(0, "开始删除...")
     try:
         # 检查源是否存在
-        source_exists = await session.get(orm_models.AnimeSource, sourceId)
+        source_stmt = select(orm_models.AnimeSource).where(orm_models.AnimeSource.id == sourceId)
+        source_result = await session.execute(source_stmt)
+        source_exists = source_result.scalar_one_or_none()
         if not source_exists:
             raise TaskSuccess("数据源未找到，无需删除。")
         
@@ -251,7 +255,9 @@ async def delete_episode_task(episodeId: int, session: AsyncSession, progress_ca
     await progress_callback(0, "开始删除...")
     try:
         # 检查分集是否存在
-        episode_exists = await session.get(orm_models.Episode, episodeId)
+        episode_stmt = select(orm_models.Episode).where(orm_models.Episode.id == episodeId)
+        episode_result = await session.execute(episode_stmt)
+        episode_exists = episode_result.scalar_one_or_none()
         if not episode_exists:
             raise TaskSuccess("分集未找到，无需删除。")
 
@@ -314,19 +320,69 @@ async def _import_episodes_iteratively(
 
             if comments is not None:
                 episode_db_id = await crud.create_episode_if_not_exists(
-                    session, anime_id, source_id, episode.episodeIndex, 
+                    session, anime_id, source_id, episode.episodeIndex,
                     episode.title, episode.url, episode.episodeId
                 )
-                added_count = await crud.save_danmaku_for_episode(session, episode_db_id, comments)
-                await session.commit()
-                
-                total_comments_added += added_count
-                successful_episodes_indices.append(episode.episodeIndex)
-                logger.info(f"分集 '{episode.title}' (DB ID: {episode_db_id}) 新增 {added_count} 条弹幕并已提交。")
+
+                # 检查分集是否已有弹幕，如果有则跳过
+                episode_stmt = select(orm_models.Episode).where(orm_models.Episode.id == episode_db_id)
+                episode_result = await session.execute(episode_stmt)
+                existing_episode = episode_result.scalar_one_or_none()
+                if existing_episode and existing_episode.danmakuFilePath and existing_episode.commentCount > 0:
+                    logger.info(f"分集 '{episode.title}' (DB ID: {episode_db_id}) 已存在弹幕 ({existing_episode.commentCount} 条)，跳过导入。")
+                    successful_episodes_indices.append(episode.episodeIndex)
+                else:
+                    added_count = await crud.save_danmaku_for_episode(session, episode_db_id, comments)
+                    await session.commit()
+
+                    total_comments_added += added_count
+                    successful_episodes_indices.append(episode.episodeIndex)
+                    logger.info(f"分集 '{episode.title}' (DB ID: {episode_db_id}) 新增 {added_count} 条弹幕并已提交。")
             else:
                 failed_episodes_count += 1
                 logger.warning(f"分集 '{episode.title}' 获取弹幕失败（返回 None）。")
 
+        except RateLimitExceededError as e:
+            # 如果是配置验证失败（通常retry_after_seconds=3600），跳过当前分集
+            if e.retry_after_seconds >= 3600:
+                failed_episodes_count += 1
+                logger.error(f"分集 '{episode.title}' 因流控配置验证失败而跳过: {str(e)}")
+                continue
+
+            logger.warning(f"分集导入因达到速率限制而暂停: {e}")
+            await progress_callback(base_progress, f"速率受限，将在 {e.retry_after_seconds:.0f} 秒后自动重试...", status=TaskStatus.PAUSED)
+            await asyncio.sleep(e.retry_after_seconds)
+            # 重试当前分集
+            try:
+                await rate_limiter.check(scraper.provider_name)
+                comments = await scraper.get_comments(episode.episodeId, progress_callback=lambda p, msg: progress_callback(base_progress + int(p * 0.6 / len(episodes)), msg))
+                if comments is not None:
+                    await rate_limiter.increment(scraper.provider_name)
+                    episode_db_id = await crud.create_episode_if_not_exists(
+                        session, anime_id, source_id, episode.episodeIndex,
+                        episode.title, episode.url, episode.episodeId
+                    )
+
+                    # 检查分集是否已有弹幕，如果有则跳过
+                    episode_stmt = select(orm_models.Episode).where(orm_models.Episode.id == episode_db_id)
+                    episode_result = await session.execute(episode_stmt)
+                    existing_episode = episode_result.scalar_one_or_none()
+                    if existing_episode and existing_episode.danmakuFilePath and existing_episode.commentCount > 0:
+                        logger.info(f"分集 '{episode.title}' (DB ID: {episode_db_id}) 已存在弹幕 ({existing_episode.commentCount} 条)，跳过导入。")
+                        successful_episodes_indices.append(episode.episodeIndex)
+                    else:
+                        added_count = await crud.save_danmaku_for_episode(session, episode_db_id, comments)
+                        await session.commit()
+
+                        total_comments_added += added_count
+                        successful_episodes_indices.append(episode.episodeIndex)
+                        logger.info(f"分集 '{episode.title}' (DB ID: {episode_db_id}) 重试后新增 {added_count} 条弹幕并已提交。")
+                else:
+                    failed_episodes_count += 1
+                    logger.warning(f"分集 '{episode.title}' 重试后仍获取弹幕失败（返回 None）。")
+            except Exception as retry_e:
+                failed_episodes_count += 1
+                logger.error(f"重试处理分集 '{episode.title}' 时发生错误: {retry_e}")
         except Exception as e:
             failed_episodes_count += 1
             logger.error(f"处理分集 '{episode.title}' 时发生错误: {e}")
@@ -344,7 +400,9 @@ async def delete_bulk_episodes_task(episodeIds: List[int], session: AsyncSession
             progress = 5 + int(((i + 1) / total) * 90) if total > 0 else 95
             await progress_callback(progress, f"正在删除分集 {i+1}/{total} (ID: {episode_id}) 的数据...")
 
-            episode = await session.get(orm_models.Episode, episode_id)
+            episode_stmt = select(orm_models.Episode).where(orm_models.Episode.id == episode_id)
+            episode_result = await session.execute(episode_stmt)
+            episode = episode_result.scalar_one_or_none()
             if episode:
                 _delete_danmaku_file(episode.danmakuFilePath)
                 await session.delete(episode)
@@ -474,12 +532,12 @@ async def generic_import_task(
         await rate_limiter.check(scraper.provider_name)
         first_comments = await scraper.get_comments(first_episode.episodeId, progress_callback=lambda p, msg: progress_callback(20 + p * 0.1, msg))
         await rate_limiter.increment(scraper.provider_name)
-        
+
         if first_comments:
             first_episode_success = True
             logger.info(f"数据源验证成功，第一集获取到 {len(first_comments)} 条弹幕")
             await progress_callback(30, "数据源验证成功，正在创建数据库条目...")
-            
+
             # 下载海报图片
             if imageUrl:
                 try:
@@ -487,19 +545,19 @@ async def generic_import_task(
                 except Exception as e:
                     logger.warning(f"海报下载失败: {e}")
                     image_download_failed = True
-            
+
             # 创建主条目
             # 修正：确保在创建时也使用年份进行重复检查
             anime_id = await crud.get_or_create_anime(
-                session, 
-                title_to_use, 
-                mediaType, 
+                session,
+                title_to_use,
+                mediaType,
                 season_to_use,
-                imageUrl, 
-                local_image_path, 
+                imageUrl,
+                local_image_path,
                 year
             )
-            
+
             # 更新元数据
             await crud.update_metadata_if_empty(
                 session, anime_id,
@@ -509,14 +567,68 @@ async def generic_import_task(
                 douban_id=doubanId,
                 bangumi_id=bangumiId
             )
-            
+
             # 链接数据源
             source_id = await crud.link_source_to_anime(session, anime_id, provider, mediaId)
             await session.commit()
-            
+
             logger.info(f"主条目创建完成 (Anime ID: {anime_id}, Source ID: {source_id})")
         else:
             logger.warning(f"第一集未获取到弹幕，数据源可能无效")
+    except RateLimitExceededError as e:
+        # 如果是配置验证失败（通常retry_after_seconds=3600），直接失败
+        if e.retry_after_seconds >= 3600:
+            raise TaskSuccess(f"流控配置验证失败，任务已终止: {str(e)}")
+
+        logger.warning(f"通用导入任务因达到速率限制而暂停: {e}")
+        await progress_callback(20, f"速率受限，将在 {e.retry_after_seconds:.0f} 秒后自动重试...", status=TaskStatus.PAUSED)
+        await asyncio.sleep(e.retry_after_seconds)
+        # 重试流控检查和第一集获取
+        await rate_limiter.check(scraper.provider_name)
+        first_comments = await scraper.get_comments(first_episode.episodeId, progress_callback=lambda p, msg: progress_callback(20 + p * 0.1, msg))
+        await rate_limiter.increment(scraper.provider_name)
+
+        if first_comments:
+            first_episode_success = True
+            logger.info(f"数据源验证成功（重试后），第一集获取到 {len(first_comments)} 条弹幕")
+            await progress_callback(30, "数据源验证成功，正在创建数据库条目...")
+
+            # 下载海报图片
+            if imageUrl:
+                try:
+                    local_image_path = await download_image(imageUrl, session, manager, provider)
+                except Exception as e:
+                    logger.warning(f"海报下载失败: {e}")
+                    image_download_failed = True
+
+            # 创建主条目
+            anime_id = await crud.get_or_create_anime(
+                session,
+                title_to_use,
+                mediaType,
+                season_to_use,
+                imageUrl,
+                local_image_path,
+                year
+            )
+
+            # 更新元数据
+            await crud.update_metadata_if_empty(
+                session, anime_id,
+                tmdb_id=tmdbId,
+                imdb_id=imdbId,
+                tvdb_id=tvdbId,
+                douban_id=doubanId,
+                bangumi_id=bangumiId
+            )
+
+            # 链接数据源
+            source_id = await crud.link_source_to_anime(session, anime_id, provider, mediaId)
+            await session.commit()
+
+            logger.info(f"主条目创建完成 (Anime ID: {anime_id}, Source ID: {source_id})")
+        else:
+            logger.warning(f"第一集未获取到弹幕（重试后），数据源可能无效")
     except Exception as e:
         logger.error(f"验证第一集时发生错误: {e}")
 
@@ -563,12 +675,52 @@ async def edited_import_task(
     if not episodes:
         raise TaskSuccess("没有提供任何分集，任务结束。")
 
+    # 首先检查是否已存在数据源
+    anime_id = await crud.get_anime_id_by_source_media_id(session, request_data.provider, request_data.mediaId)
+    source_id = None
+
+    if anime_id:
+        # 如果数据源已存在，检查哪些分集已经有弹幕
+        sources = await crud.get_anime_sources(session, anime_id)
+        for source in sources:
+            if source['providerName'] == request_data.provider and source.get('mediaId') == request_data.mediaId:
+                source_id = source['sourceId']
+                break
+
+        if source_id:
+            existing_episodes = []
+            for episode in episodes:
+                # 检查是否有任何一个episode已经有弹幕
+                stmt = (
+                    select(orm_models.Episode.id)
+                    .join(orm_models.AnimeSource, orm_models.Episode.sourceId == orm_models.AnimeSource.id)
+                    .where(
+                        orm_models.AnimeSource.animeId == anime_id,
+                        orm_models.Episode.episodeIndex == episode.episodeIndex,
+                        orm_models.Episode.danmakuFilePath.isnot(None),
+                        orm_models.Episode.commentCount > 0
+                    )
+                    .limit(1)
+                )
+                result = await session.execute(stmt)
+                if result.scalar_one_or_none() is not None:
+                    existing_episodes.append(episode.episodeIndex)
+
+            if existing_episodes:
+                episode_list = ", ".join(map(str, existing_episodes))
+                logger.info(f"检测到已存在弹幕的分集: {episode_list}")
+                # 过滤掉已存在的分集
+                episodes = [ep for ep in episodes if ep.episodeIndex not in existing_episodes]
+                if not episodes:
+                    raise TaskSuccess(f"所有要导入的分集 ({episode_list}) 都已存在弹幕，无需重复导入。")
+                else:
+                    remaining_list = ", ".join(map(str, [ep.episodeIndex for ep in episodes]))
+                    logger.info(f"将跳过已存在的分集 ({episode_list})，继续导入分集: {remaining_list}")
+
     # 先验证第一集能否获取弹幕
     first_episode = episodes[0]
     await progress_callback(10, f"正在验证数据源有效性: {first_episode.title}")
-    
-    anime_id = None
-    source_id = None
+
     first_episode_comments = None
     
     try:
@@ -718,7 +870,9 @@ async def delete_bulk_sources_task(sourceIds: List[int], session: AsyncSession, 
         progress = int((i / total) * 100)
         await progress_callback(progress, f"正在删除源 {i+1}/{total} (ID: {sourceId})...")
         try:
-            source = await session.get(orm_models.AnimeSource, sourceId)
+            source_stmt = select(orm_models.AnimeSource).where(orm_models.AnimeSource.id == sourceId)
+            source_result = await session.execute(source_stmt)
+            source = source_result.scalar_one_or_none()
             if source:
                 await session.delete(source)
                 await session.commit()
@@ -747,7 +901,15 @@ async def refresh_episode_task(episodeId: int, session: AsyncSession, manager: S
         try:
             await rate_limiter.check(provider_name)
         except RateLimitExceededError as e:
-            raise TaskSuccess(f"达到速率限制。请在 {e.retry_after_seconds:.0f} 秒后重试。")
+            # 如果是配置验证失败（通常retry_after_seconds=3600），直接失败
+            if e.retry_after_seconds >= 3600:
+                raise TaskSuccess(f"流控配置验证失败，任务已终止: {str(e)}")
+
+            logger.warning(f"刷新分集任务因达到速率限制而暂停: {e}")
+            await progress_callback(30, f"速率受限，将在 {e.retry_after_seconds:.0f} 秒后自动重试...", status=TaskStatus.PAUSED)
+            await asyncio.sleep(e.retry_after_seconds)
+            # 重试流控检查
+            await rate_limiter.check(provider_name)
 
         await progress_callback(30, "正在从源获取新弹幕...")
 
@@ -1083,7 +1245,15 @@ async def manual_import_task(
         try:
             await rate_limiter.check(providerName)
         except RateLimitExceededError as e:
-            raise TaskSuccess(f"达到速率限制。请在 {e.retry_after_seconds:.0f} 秒后重试。")
+            # 如果是配置验证失败（通常retry_after_seconds=3600），直接失败
+            if e.retry_after_seconds >= 3600:
+                raise TaskSuccess(f"流控配置验证失败，任务已终止: {str(e)}")
+
+            logger.warning(f"手动导入任务因达到速率限制而暂停: {e}")
+            await progress_callback(20, f"速率受限，将在 {e.retry_after_seconds:.0f} 秒后自动重试...", status=TaskStatus.PAUSED)
+            await asyncio.sleep(e.retry_after_seconds)
+            # 重试流控检查
+            await rate_limiter.check(providerName)
 
         comments = await scraper.get_comments(episode_id_for_comments, progress_callback=progress_callback)
         if not comments:

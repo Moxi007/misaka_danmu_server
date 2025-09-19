@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import exc
 
 from .. import crud, models, tasks, utils
-from ..rate_limiter import RateLimiter
+from ..rate_limiter import RateLimiter, RateLimitExceededError
 from ..config_manager import ConfigManager
 from ..database import get_db_session
 from ..metadata_manager import MetadataSourceManager
@@ -177,23 +177,14 @@ class ControlDirectImportRequest(BaseModel):
     searchId: str = Field(..., description="来自搜索响应的searchId")
     resultIndex: int = Field(..., alias="result_index", ge=0, description="要导入的结果的索引 (从0开始)")
     # 修正：将可选的元数据ID移到模型末尾，以改善文档显示顺序
-    tmdbId: Optional[str] = ""
-    tvdbId: Optional[str] = ""
-    bangumiId: Optional[str] = ""
-    imdbId: Optional[str] = ""
-    doubanId: Optional[str] = ""
+    tmdbId: Optional[str] = None
+    tvdbId: Optional[str] = None
+    bangumiId: Optional[str] = None
+    imdbId: Optional[str] = None
+    doubanId: Optional[str] = None
 
     class Config:
         populate_by_name = True
-
-    @model_validator(mode='before')
-    @classmethod
-    def empty_str_for_none(cls, data: Any) -> Any:
-        if isinstance(data, dict):
-            for key, value in data.items():
-                if key in cls.model_fields and value is None:
-                    data[key] = ""
-        return data
 
 class ControlAnimeCreateRequest(BaseModel):
     """用于外部API自定义创建影视条目的请求模型"""
@@ -208,26 +199,17 @@ class ControlAnimeCreateRequest(BaseModel):
     aliasCn2: Optional[str] = Field(None, description="中文别名2")
     aliasCn3: Optional[str] = Field(None, description="中文别名3")
     # 修正：将可选的元数据ID移到模型末尾，以改善文档显示顺序
-    tmdbId: Optional[str] = ""
-    tvdbId: Optional[str] = ""
-    bangumiId: Optional[str] = ""
-    imdbId: Optional[str] = ""
-    doubanId: Optional[str] = ""
+    tmdbId: Optional[str] = None
+    tvdbId: Optional[str] = None
+    bangumiId: Optional[str] = None
+    imdbId: Optional[str] = None
+    doubanId: Optional[str] = None
 
     @model_validator(mode='after')
     def check_season_for_tv_series(self):
         if self.type == 'tv_series' and self.season is None:
             raise ValueError('对于电视节目 (tv_series)，季度 (season) 是必需的。')
         return self
-    
-    @model_validator(mode='before')
-    @classmethod
-    def empty_str_for_none(cls, data: Any) -> Any:
-        if isinstance(data, dict):
-            for key, value in data.items():
-                if key in cls.model_fields and value is None:
-                    data[key] = ""
-        return data
 
 class ControlEditedImportRequest(BaseModel):
     searchId: str = Field(..., description="来自搜索响应的searchId")
@@ -235,24 +217,15 @@ class ControlEditedImportRequest(BaseModel):
     title: Optional[str] = Field(None, description="覆盖原始标题")
     episodes: List[models.ProviderEpisodeInfo] = Field(..., description="编辑后的分集列表")
     # 修正：将可选的元数据ID移到模型末尾，以改善文档显示顺序
-    tmdbId: Optional[str] = ""
-    tvdbId: Optional[str] = ""
-    bangumiId: Optional[str] = ""
-    imdbId: Optional[str] = ""
-    doubanId: Optional[str] = ""
-    tmdbEpisodeGroupId: Optional[str] = Field("", description="强制指定TMDB剧集组ID")
+    tmdbId: Optional[str] = None
+    tvdbId: Optional[str] = None
+    bangumiId: Optional[str] = None
+    imdbId: Optional[str] = None
+    doubanId: Optional[str] = None
+    tmdbEpisodeGroupId: Optional[str] = Field(None, description="强制指定TMDB剧集组ID")
 
     class Config:
         populate_by_name = True
-
-    @model_validator(mode='before')
-    @classmethod
-    def empty_str_for_none(cls, data: Any) -> Any:
-        if isinstance(data, dict):
-            for key, value in data.items():
-                if key in cls.model_fields and value is None:
-                    data[key] = ""
-        return data
 
 class ControlUrlImportRequest(BaseModel):
     """用于外部API通过URL导入到指定源的请求模型"""
@@ -586,6 +559,7 @@ async def direct_import(
     task_manager: TaskManager = Depends(get_task_manager),
     manager: ScraperManager = Depends(get_scraper_manager),
     metadata_manager: MetadataSourceManager = Depends(get_metadata_manager),
+    config_manager: ConfigManager = Depends(get_config_manager),
     rate_limiter: RateLimiter = Depends(get_rate_limiter)
 ):
     """
@@ -646,7 +620,7 @@ async def direct_import(
         task_coro = lambda session, cb: tasks.generic_import_task(
             provider=item_to_import.provider,
             mediaId=item_to_import.mediaId,
-            animeTitle=item_to_import.title, 
+            animeTitle=item_to_import.title,
             # 修正：传递从搜索结果中获取的年份和海报URL
             mediaType=item_to_import.type,
             season=item_to_import.season,
@@ -654,6 +628,7 @@ async def direct_import(
             currentEpisodeIndex=item_to_import.currentEpisodeIndex,
             imageUrl=item_to_import.imageUrl,
             doubanId=payload.doubanId,
+            config_manager=config_manager,
             metadata_manager=metadata_manager, tmdbId=payload.tmdbId, imdbId=payload.imdbId,
             tvdbId=payload.tvdbId, bangumiId=payload.bangumiId,
             progress_callback=cb, session=session, manager=manager, task_manager=task_manager,
@@ -738,8 +713,8 @@ async def edited_import(
     item_to_import = cached_results[payload.resultIndex]
 
     # 关键修复：恢复并完善在任务提交前的重复检查。
-    # 对于编辑后导入，我们只检查作品是否重复，因为分集是用户自定义的。
-    # 数据源重复的检查将在任务内部处理（如果需要）。
+    # 对于编辑后导入，我们需要检查每个单集是否已存在。
+    # 首先检查数据源是否重复
     duplicate_reason = await crud.check_duplicate_import(
         session=session,
         provider=item_to_import.provider,
@@ -748,16 +723,38 @@ async def edited_import(
         media_type=item_to_import.type,
         season=item_to_import.season,
         year=item_to_import.year,
-        is_single_episode=False, # 编辑导入总是视为全量导入
+        is_single_episode=False, # 先检查数据源重复
         episode_index=None
     )
-    # 对于编辑后导入，如果作品已存在，我们允许关联。但如果数据源已存在，则阻止。
-    # 这是一个权衡，与UI行为保持一致。
+    # 如果数据源已存在，则需要进一步检查单集
     if duplicate_reason and "数据源已存在" in duplicate_reason:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=duplicate_reason
-        )
+        # 获取现有的anime_id
+        anime_id = await crud.get_anime_id_by_source_media_id(session, item_to_import.provider, item_to_import.mediaId)
+        if anime_id:
+            # 检查每个要导入的单集是否已存在
+            existing_episodes = []
+            for episode in payload.episodes:
+                episode_exists = await crud.find_episode_by_index(session, anime_id, episode.episodeIndex)
+                if episode_exists:
+                    existing_episodes.append(episode.episodeIndex)
+
+            # 如果所有集都已存在，则阻止导入
+            if len(existing_episodes) == len(payload.episodes):
+                episode_list = ", ".join(map(str, existing_episodes))
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=f"所有要导入的分集 ({episode_list}) 都已存在于媒体库中"
+                )
+            # 如果部分集已存在，给出警告但允许导入
+            elif existing_episodes:
+                episode_list = ", ".join(map(str, existing_episodes))
+                logger.warning(f"编辑导入: 分集 {episode_list} 已存在，将跳过这些分集")
+        else:
+            # 如果找不到anime_id，说明数据源存在但关联有问题，阻止导入
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=duplicate_reason
+            )
 
 
     # 构建编辑导入请求
@@ -1225,7 +1222,7 @@ async def overwrite_danmaku(episodeId: int, payload: models.DanmakuUpdateRequest
                 comment_dict['t'] = 0.0 # 如果解析失败，则默认为0
             comments_to_insert.append(comment_dict)
 
-        added = await crud.bulk_insert_comments(session, episodeId, comments_to_insert)
+        added = await crud.save_danmaku_for_episode(session, episodeId, comments_to_insert)
         raise TaskSuccess(f"弹幕覆盖完成，新增 {added} 条。")
     try:
         task_id, _ = await task_manager.submit_task(overwrite_task, f"外部API覆盖弹幕 (分集ID: {episodeId})")

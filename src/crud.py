@@ -862,7 +862,9 @@ async def check_episode_exists(session: AsyncSession, episode_id: int) -> bool:
 
 async def fetch_comments(session: AsyncSession, episode_id: int) -> List[Dict[str, Any]]:
     """从XML文件获取弹幕。"""
-    episode = await session.get(Episode, episode_id)
+    episode_stmt = select(Episode).where(Episode.id == episode_id)
+    episode_result = await session.execute(episode_stmt)
+    episode = episode_result.scalar_one_or_none()
     if not episode or not episode.danmakuFilePath:
         return []
     
@@ -898,7 +900,9 @@ async def create_episode_if_not_exists(session: AsyncSession, anime_id: int, sou
     new_episode_id = int(new_episode_id_str)
 
     # 2. 直接检查这个ID是否存在
-    existing_episode = await session.get(Episode, new_episode_id)
+    existing_episode_stmt = select(Episode).where(Episode.id == new_episode_id)
+    existing_episode_result = await session.execute(existing_episode_stmt)
+    existing_episode = existing_episode_result.scalar_one_or_none()
     if existing_episode:
         return existing_episode.id
 
@@ -931,11 +935,11 @@ async def save_danmaku_for_episode(
     if not comments:
         return 0
 
-    episode = await session.get(
-        Episode, 
-        episode_id, 
-        options=[selectinload(Episode.source).selectinload(AnimeSource.anime)]
+    episode_stmt = select(Episode).where(Episode.id == episode_id).options(
+        selectinload(Episode.source).selectinload(AnimeSource.anime)
     )
+    episode_result = await session.execute(episode_stmt)
+    episode = episode_result.scalar_one_or_none()
     if not episode:
         raise ValueError(f"找不到ID为 {episode_id} 的分集")
 

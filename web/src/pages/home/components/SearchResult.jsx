@@ -650,9 +650,23 @@ export const SearchResult = () => {
                             {/* 新增：补充搜索结果展示逻辑 */}
                             {item.episodeCount === 0 && (
                               (() => {
-                                const best_supplement = supplementalResults.find(sup => 
+                                // 简单的字符串相似度检查，替代fuzz.token_set_ratio
+                                const calculateSimilarity = (str1, str2) => {
+                                  if (!str1 || !str2) return 0;
+                                  const s1 = str1.toLowerCase().trim();
+                                  const s2 = str2.toLowerCase().trim();
+                                  if (s1 === s2) return 100;
+                                  if (s1.includes(s2) || s2.includes(s1)) return 85;
+                                  // 简单的词汇匹配
+                                  const words1 = s1.split(/\s+/);
+                                  const words2 = s2.split(/\s+/);
+                                  const commonWords = words1.filter(word => words2.includes(word));
+                                  return (commonWords.length / Math.max(words1.length, words2.length)) * 100;
+                                };
+
+                                const best_supplement = supplementalResults.find(sup =>
                                   sup.provider !== item.provider &&
-                                  fuzz.token_set_ratio(item.title, sup.title) > 90
+                                  calculateSimilarity(item.title, sup.title) > 80
                                 );
                                 if (best_supplement) {
                                   return (

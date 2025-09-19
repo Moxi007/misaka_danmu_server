@@ -266,7 +266,7 @@ class BaseScraper(ABC):
     async def get_comments(self, episode_id: str, progress_callback: Optional[Callable] = None) -> List[dict]:
         """
         获取给定分集ID的所有弹幕。
-        返回的字典列表应与 crud.bulk_insert_comments 的期望格式兼容。
+        返回的字典列表应与 crud.save_danmaku_for_episode 的期望格式兼容。
         """
         raise NotImplementedError
 

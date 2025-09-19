@@ -25,7 +25,8 @@ class GamerScraper(BaseScraper):
     test_url = "https://ani.gamer.com.tw"    
     configurable_fields: Dict[str, Tuple[str, str, str]] = {
         "gamerCookie": ("巴哈姆特动画疯 Cookie", "string", "用于访问动画疯的Cookie。"),
-        "gamerUserAgent": ("巴哈姆特动画疯 User-Agent", "string", "用于访问动画疯的User-Agent。")
+        "gamerUserAgent": ("巴哈姆特动画疯 User-Agent", "string", "用于访问动画疯的User-Agent。"),
+        "gamerFlareSolverrUrl": ("FlareSolverr 服务地址", "string", "用于绕过Cloudflare盾的FlareSolverr服务地址，例如: http://localhost:8191")
     }
     def __init__(self, session_factory: async_sessionmaker[AsyncSession], config_manager: ConfigManager):
         super().__init__(session_factory, config_manager)
@@ -79,14 +80,142 @@ class GamerScraper(BaseScraper):
         # 4. 如果规则为空或未配置，则不进行过滤
         return None
 
+    async def _request_with_flaresolverr(self, method: str, url: str, **kwargs) -> httpx.Response:
+        """使用FlareSolverr发送请求以绕过Cloudflare盾。"""
+        flaresolverr_url = await self.config_manager.get("gamerFlareSolverrUrl", "")
+        if not flaresolverr_url:
+            raise ValueError("FlareSolverr URL未配置")
+
+        # 构建FlareSolverr请求
+        flaresolverr_endpoint = f"{flaresolverr_url.rstrip('/')}/v1"
+
+        # 准备请求头
+        headers = kwargs.get('headers', {})
+        cookie = await self.config_manager.get("gamerCookie", "")
+        user_agent = await self.config_manager.get("gamerUserAgent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+
+        if cookie:
+            headers['Cookie'] = cookie
+        headers['User-Agent'] = user_agent
+
+        # 构建FlareSolverr请求体
+        flaresolverr_payload = {
+            "cmd": "request.get" if method.upper() == "GET" else "request.post",
+            "url": url,
+            "headers": headers,
+            "maxTimeout": 60000
+        }
+
+        # 如果是POST请求，添加数据
+        if method.upper() == "POST" and 'data' in kwargs:
+            flaresolverr_payload["postData"] = kwargs['data']
+
+        # 发送请求到FlareSolverr
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            flaresolverr_response = await client.post(flaresolverr_endpoint, json=flaresolverr_payload)
+            flaresolverr_response.raise_for_status()
+
+            result = flaresolverr_response.json()
+            if result.get("status") != "ok":
+                raise httpx.HTTPStatusError(
+                    f"FlareSolverr请求失败: {result.get('message', 'Unknown error')}",
+                    request=flaresolverr_response.request,
+                    response=flaresolverr_response
+                )
+
+            solution = result.get("solution", {})
+
+            # 创建一个简单的响应包装类
+            class FlareSolverrResponse:
+                def __init__(self, status_code: int, headers: dict, content: str):
+                    self.status_code = status_code
+                    self.headers = headers
+                    self._content = content.encode('utf-8')
+                    self._text = content
+
+                @property
+                def text(self) -> str:
+                    return self._text
+
+                @property
+                def content(self) -> bytes:
+                    return self._content
+
+                def raise_for_status(self):
+                    if 400 <= self.status_code < 600:
+                        raise httpx.HTTPStatusError(
+                            f"HTTP {self.status_code}",
+                            request=None,
+                            response=self
+                        )
+
+            return FlareSolverrResponse(
+                status_code=solution.get("status", 200),
+                headers=solution.get("headers", {}),
+                content=solution.get("response", "")
+            )
+
     async def _request(self, method: str, url: str, **kwargs) -> httpx.Response:
-        """一个简单的请求包装器。"""
+        """请求包装器，支持自动检测Cloudflare盾并使用FlareSolverr绕过。"""
         client = await self._ensure_client()
-        response = await client.request(method, url, **kwargs)
-        if await self._should_log_responses():
-            # 截断HTML以避免日志过长
-            scraper_responses_logger.debug(f"Gamer Response ({method} {url}): status={response.status_code}, text={response.text[:500]}")
-        return response
+
+        try:
+            response = await client.request(method, url, **kwargs)
+
+            # 检测是否遇到Cloudflare盾
+            if self._is_cloudflare_challenge(response):
+                self.logger.warning(f"Gamer: 检测到Cloudflare盾，尝试使用FlareSolverr绕过...")
+                flaresolverr_url = await self.config_manager.get("gamerFlareSolverrUrl", "")
+
+                if flaresolverr_url:
+                    try:
+                        response = await self._request_with_flaresolverr(method, url, **kwargs)
+                        self.logger.info(f"Gamer: 成功使用FlareSolverr绕过Cloudflare盾")
+                    except Exception as e:
+                        self.logger.error(f"Gamer: FlareSolverr请求失败: {e}")
+                        # 如果FlareSolverr失败，返回原始响应
+                        pass
+                else:
+                    self.logger.warning(f"Gamer: 检测到Cloudflare盾但未配置FlareSolverr URL")
+
+            if await self._should_log_responses():
+                # 截断HTML以避免日志过长
+                scraper_responses_logger.debug(f"Gamer Response ({method} {url}): status={response.status_code}, text={response.text[:500]}")
+
+            return response
+
+        except httpx.HTTPStatusError as e:
+            # 如果遇到HTTP错误，也尝试使用FlareSolverr
+            if e.response.status_code in [403, 503] and "cloudflare" in e.response.text.lower():
+                self.logger.warning(f"Gamer: HTTP错误可能由Cloudflare引起，尝试使用FlareSolverr...")
+                flaresolverr_url = await self.config_manager.get("gamerFlareSolverrUrl", "")
+
+                if flaresolverr_url:
+                    try:
+                        response = await self._request_with_flaresolverr(method, url, **kwargs)
+                        self.logger.info(f"Gamer: 成功使用FlareSolverr绕过Cloudflare错误")
+                        return response
+                    except Exception as flare_e:
+                        self.logger.error(f"Gamer: FlareSolverr请求失败: {flare_e}")
+
+            # 如果不是Cloudflare问题或FlareSolverr失败，重新抛出原始异常
+            raise e
+
+    def _is_cloudflare_challenge(self, response: httpx.Response) -> bool:
+        """检测响应是否包含Cloudflare挑战页面。"""
+        if response.status_code in [403, 503]:
+            content = response.text.lower()
+            cloudflare_indicators = [
+                "cloudflare",
+                "checking your browser",
+                "ddos protection",
+                "ray id",
+                "cf-ray",
+                "please wait while we check your browser",
+                "browser check"
+            ]
+            return any(indicator in content for indicator in cloudflare_indicators)
+        return False
 
     async def close(self):
         if self.client:
