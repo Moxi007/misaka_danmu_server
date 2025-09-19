@@ -114,12 +114,12 @@ async def _migrate_text_to_mediumtext_task(conn: AsyncConnection, db_type: str, 
         if current_type and current_type.lower() == 'text':
             await conn.execute(text(f"ALTER TABLE {table} MODIFY COLUMN `{column}` MEDIUMTEXT"))
 
-async def _migrate_add_source_url_to_episode_task(conn: AsyncConnection, db_type: str):
+async def _migrate_add_source_url_to_episode_task(conn: AsyncConnection, db_type: str, db_name: str):
     """迁移任务: 确保 episode 表有 source_url 字段，并处理旧的命名。"""
     old_name, new_name, table = "sourceUrl", "source_url", "episode"
     if db_type == "mysql":
-        check_old_sql = text(f"SELECT 1 FROM information_schema.columns WHERE table_name = '{table}' AND column_name = '{old_name}'")
-        check_new_sql = text(f"SELECT 1 FROM information_schema.columns WHERE table_name = '{table}' AND column_name = '{new_name}'")
+        check_old_sql = text(f"SELECT 1 FROM information_schema.columns WHERE table_schema = '{db_name}' AND table_name = '{table}' AND column_name = '{old_name}'")
+        check_new_sql = text(f"SELECT 1 FROM information_schema.columns WHERE table_schema = '{db_name}' AND table_name = '{table}' AND column_name = '{new_name}'")
         rename_sql = text(f"ALTER TABLE `{table}` CHANGE COLUMN `{old_name}` `{new_name}` TEXT NULL")
         add_sql = text(f"ALTER TABLE `{table}` ADD COLUMN `{new_name}` TEXT NULL")
     else: # postgresql
@@ -198,6 +198,21 @@ async def _migrate_api_token_to_daily_limit_task(conn: AsyncConnection, db_type:
             await conn.execute(text('ALTER TABLE api_tokens ADD COLUMN "last_call_at" TIMESTAMP NULL DEFAULT NULL;'))
         logger.info("成功为 api_tokens 表添加每日限制相关列。")
 
+async def _migrate_add_log_raw_responses_to_metadata_sources_task(conn: AsyncConnection, db_type: str):
+    """迁移任务: 确保 metadata_sources 表有 log_raw_responses 字段。"""
+    table_name = 'metadata_sources'
+    column_name = 'log_raw_responses'
+    
+    if db_type == "mysql":
+        check_column_sql = text(f"SELECT 1 FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = '{table_name}' AND column_name = '{column_name}'")
+        add_column_sql = text(f"ALTER TABLE {table_name} ADD COLUMN `{column_name}` BOOLEAN NOT NULL DEFAULT FALSE")
+    else: # postgresql
+        check_column_sql = text(f"SELECT 1 FROM information_schema.columns WHERE table_name = '{table_name}' AND column_name = '{column_name}'")
+        add_column_sql = text(f'ALTER TABLE {table_name} ADD COLUMN "{column_name}" BOOLEAN NOT NULL DEFAULT FALSE')
+
+    if not (await conn.execute(check_column_sql)).scalar_one_or_none():
+        await conn.execute(add_column_sql)
+
 
 async def run_migrations(conn: AsyncConnection, db_type: str, db_name: str):
     """
@@ -212,9 +227,10 @@ async def run_migrations(conn: AsyncConnection, db_type: str, db_name: str):
         ("migrate_add_source_order_v1", _migrate_add_source_order_task, (db_type, db_name)),
         ("migrate_add_danmaku_file_path_v1", _migrate_add_danmaku_file_path_task, (db_type,)),
         ("migrate_text_to_mediumtext_v1", _migrate_text_to_mediumtext_task, (db_type, db_name)),
-        ("migrate_add_source_url_to_episode_v1", _migrate_add_source_url_to_episode_task, (db_type,)),
+        ("migrate_add_source_url_to_episode_v1", _migrate_add_source_url_to_episode_task, (db_type, db_name)),
         ("migrate_add_unique_key_to_task_history_v1", _migrate_add_unique_key_to_task_history_task, (db_type,)),
         ("migrate_api_token_to_daily_limit_v1", _migrate_api_token_to_daily_limit_task, (db_type,)),
+        ("migrate_add_log_raw_responses_to_metadata_sources_v1", _migrate_add_log_raw_responses_to_metadata_sources_task, (db_type,)),
     ]
 
     for migration_id, migration_func, args in migrations:

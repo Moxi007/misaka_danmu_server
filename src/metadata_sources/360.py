@@ -68,6 +68,8 @@ class So360CoverInfo(BaseModel):
 class So360MetadataSource(BaseMetadataSource):
     provider_name = "360"
     test_url = "https://so.360kan.com"
+    is_failover_source = True
+    has_force_aux_search_toggle = True
     def __init__(self, session_factory, config_manager: ConfigManager, scraper_manager):
         super().__init__(session_factory, config_manager, scraper_manager)
         self.api_base_url = "https://api.so.360kan.com"

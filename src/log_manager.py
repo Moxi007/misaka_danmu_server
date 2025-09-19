@@ -139,6 +139,29 @@ def setup_logging():
     scraper_logger.addHandler(scraper_handler)
     logging.info("专用的搜索源响应日志已初始化，将输出到 %s", scraper_log_file)
 
+    # --- 新增：为元数据响应设置一个专用的日志记录器 ---
+    metadata_log_file = log_dir / "metadata_responses.log"
+
+    if metadata_log_file.exists():
+        try:
+            with open(metadata_log_file, 'w', encoding='utf-8') as f:
+                f.truncate(0)
+            logging.info(f"已清空旧的元数据响应日志: {metadata_log_file}")
+        except IOError as e:
+            logging.error(f"清空元数据响应日志失败: {e}")
+
+    metadata_logger = logging.getLogger("metadata_responses")
+    metadata_logger.setLevel(logging.DEBUG)
+    metadata_logger.propagate = False
+
+    metadata_handler = logging.handlers.RotatingFileHandler(
+        metadata_log_file, maxBytes=10*1024*1024, backupCount=3, encoding='utf-8'
+    )
+    metadata_handler.setFormatter(logging.Formatter(
+        '[%(asctime)s] - %(message)s', datefmt='%Y-%m-%d %H:%M:%S'
+    ))
+    metadata_logger.addHandler(metadata_handler)
+    logging.info("专用的元数据响应日志已初始化，将输出到 %s", metadata_log_file)
     # --- 新增：为 Webhook 原始请求设置一个专用的日志记录器 ---
     webhook_log_file = log_dir / "webhook_raw.log"
 

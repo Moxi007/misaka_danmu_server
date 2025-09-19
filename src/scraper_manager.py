@@ -310,15 +310,17 @@ class ScraperManager:
         在指定的搜索源上搜索，如果失败则尝试故障转移。
         """
         scraper = self.get_scraper(provider)
-        results = await scraper.search(keyword, episode_info)
+        try:
+            results = await scraper.search(keyword, episode_info)
+        except Exception as e:
+            logging.getLogger(__name__).error(f"主搜索源 '{provider}' 搜索时发生错误: {e}", exc_info=True)
+            results = []
         
         # 如果主搜索源没有结果，则尝试故障转移
         if not results and self.metadata_manager:
-            logging.getLogger(__name__).info(f"主搜索源 '{provider}' 未找到结果，正在尝试使用元数据源进行故障转移...")
             try:
                 failover_results = await self.metadata_manager.supplement_search_result(provider, keyword, episode_info)
                 if failover_results:
-                    logging.getLogger(__name__).info(f"通过故障转移找到 {len(failover_results)} 个结果。")
                     return failover_results
             except Exception as e:
                 logging.getLogger(__name__).error(f"搜索故障转移过程中发生错误: {e}", exc_info=True)

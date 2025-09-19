@@ -92,6 +92,7 @@ export const SearchResult = () => {
   const [editConfirmLoading, setEditConfirmLoading] = useState(false)
   const [range, setRange] = useState([1, 1])
   const [episodePageSize, setEpisodePageSize] = useState(10)
+  const [episodeOrder, setEpisodeOrder] = useState('asc') // 新增：排序状态
 
   const sensors = useSensors(
     useSensor(MouseSensor, {
@@ -109,6 +110,7 @@ export const SearchResult = () => {
 
   const searchSeason = lastSearchResultData?.search_season
   const searchEpisode = lastSearchResultData?.search_episode
+  const supplementalResults = lastSearchResultData?.supplemental_results || []
 
   const [loading, setLoading] = useState(false)
 
@@ -480,6 +482,23 @@ export const SearchResult = () => {
     )
   }
 
+  // 新增：切换排序的处理函数
+  const handleToggleOrder = () => {
+    const newOrder = episodeOrder === 'asc' ? 'desc' : 'asc'
+    setEpisodeOrder(newOrder)
+    
+    setEditEpisodeList(list => {
+      const sortedList = [...list].sort((a, b) => {
+        if (newOrder === 'asc') {
+          return a.episodeIndex - b.episodeIndex
+        } else {
+          return b.episodeIndex - a.episodeIndex
+        }
+      })
+      return sortedList
+    })
+  }
+
   return (
     <div className="my-4">
       <Card title="搜索结果" loading={searchLoading}>
@@ -628,6 +647,30 @@ export const SearchResult = () => {
                                 </Tag>
                               )}
                             </div>
+                            {/* 新增：补充搜索结果展示逻辑 */}
+                            {item.episodeCount === 0 && (
+                              (() => {
+                                const best_supplement = supplementalResults.find(sup => 
+                                  sup.provider !== item.provider &&
+                                  fuzz.token_set_ratio(item.title, sup.title) > 90
+                                );
+                                if (best_supplement) {
+                                  return (
+                                    <div className="mt-2 p-2 bg-gray-100 dark:bg-gray-700 rounded-md flex items-center gap-2">
+                                      <Tag color="purple">{best_supplement.provider}</Tag>
+                                      <span className="text-sm text-gray-500 dark:text-gray-400">
+                                        找到补充源: {best_supplement.title}
+                                      </span>
+                                      <Button size="small" type="link" onClick={(e) => {
+                                        e.stopPropagation(); // 防止触发外层的选择事件
+                                        handleImportDanmu(best_supplement);
+                                      }}>使用此源导入</Button>
+                                    </div>
+                                  );
+                                }
+                                return null;
+                              })()
+                            )}
                           </div>
                         </div>
                       </Col>
@@ -814,6 +857,29 @@ export const SearchResult = () => {
         cancelText="取消"
         okText="确认导入"
         onCancel={() => setEditImportOpen(false)}
+        footer={[
+          <Button
+            key="order"
+            type={episodeOrder === 'asc' ? 'default' : 'primary'}
+            onClick={handleToggleOrder}
+            style={{ float: 'left' }}
+          >
+            {episodeOrder === 'asc' ? '正序' : '倒序'}
+          </Button>,
+          <Button key="cancel" onClick={() => setEditImportOpen(false)}>
+            取消
+          </Button>,
+          <Button
+            key="submit"
+            type="primary"
+            loading={editConfirmLoading}
+            onClick={() => {
+              handleImportEdit()
+            }}
+          >
+            确认导入
+          </Button>,
+        ]}
       >
         <div className="flex item-wrap md:flex-nowrap justify-between items-center gap-3 my-6">
           <div className="shrink-0">作品标题:</div>

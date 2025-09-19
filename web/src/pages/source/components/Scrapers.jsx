@@ -60,7 +60,7 @@ const SortableItem = ({
     transition,
     isDragging,
   } = useSortable({
-    id: item.id || `item-${index}`, // 使用item.id或索引作为唯一标识
+    id: item.providerName, // 使用 providerName 作为唯一ID
     data: {
       item,
       index,
@@ -143,7 +143,6 @@ export const Scrapers = () => {
   const [biliQrcodeStatus, setBiliQrcodeStatus] = useState('')
   const [biliQrcodeLoading, setBiliQrcodeLoading] = useState(false)
   const [biliUserinfo, setBiliUserinfo] = useState({})
-  console.log(biliUserinfo, 'biliUserinfo')
   const [biliLoginOpen, setBiliLoginOpen] = useState(false)
   const [biliQrcodeChecked, setBiliQrcodeChecked] = useState(false)
   /** 扫码登录轮训 */
@@ -192,12 +191,8 @@ export const Scrapers = () => {
     }
 
     // 找到原位置和新位置
-    const activeIndex = list.findIndex(
-      item => item.providerName === active.data.current.item.providerName
-    )
-    const overIndex = list.findIndex(
-      item => item.providerName === over.data.current.item.providerName
-    )
+    const activeIndex = list.findIndex(item => item.providerName === active.id)
+    const overIndex = list.findIndex(item => item.providerName === over.id)
 
     if (activeIndex !== -1 && overIndex !== -1) {
       // 1. 重新排列数组
@@ -212,7 +207,6 @@ export const Scrapers = () => {
       }))
 
       // 3. 更新状态
-      console.log(updatedList, 'updatedList')
       setList(updatedList)
       setScrapers(updatedList)
       messageApi.success(
@@ -227,9 +221,7 @@ export const Scrapers = () => {
   const handleDragStart = event => {
     const { active } = event
     // 找到当前拖拽的项
-    const item = list.find(
-      item => (item.id || `item-${list.indexOf(item)}`) === active.id
-    )
+    const item = list.find(item => item.providerName === active.id)
     setActiveItem(item)
   }
 
@@ -238,7 +230,7 @@ export const Scrapers = () => {
       if (it.providerName === item.providerName) {
         return {
           ...it,
-          isEnabled: Number(!it.isEnabled),
+          isEnabled: !it.isEnabled,
         }
       } else {
         return it
@@ -255,16 +247,23 @@ export const Scrapers = () => {
     setOpen(true)
     setSetname(item.providerName)
     const setNameCapitalize = `${item.providerName.charAt(0).toUpperCase()}${item.providerName.slice(1)}`
+
+    // 动态地为所有可配置字段设置表单初始值
+    const dynamicInitialValues = {}
+    if (item.configurableFields) {
+      for (const key of Object.keys(item.configurableFields)) {
+        const camelKey = key.replace(/_([a-z])/g, g => g[1].toUpperCase())
+        dynamicInitialValues[camelKey] = res.data?.[camelKey]
+      }
+    }
+
     form.setFieldsValue({
       [`scraper${setNameCapitalize}LogResponses`]:
         res.data?.[`scraper${setNameCapitalize}LogResponses`] ?? false,
       [`${item.providerName}EpisodeBlacklistRegex`]:
         res.data?.[`${item.providerName}EpisodeBlacklistRegex`] || '',
-      [`${item.providerName}Cookie`]:
-        res.data?.[`${item.providerName}Cookie`] ?? undefined,
-      [`${item.providerName}UserAgent`]:
-        res.data?.[`${item.providerName}UserAgent`] ?? undefined,
       useProxy: res.data?.useProxy ?? false,
+      ...dynamicInitialValues,
     })
   }
 
@@ -391,6 +390,85 @@ export const Scrapers = () => {
     )
   }
 
+  const renderDynamicFormItems = () => {
+    const currentScraper = list.find(it => it.providerName === setname)
+    if (!currentScraper || !currentScraper.configurableFields) {
+      return null
+    }
+
+    return Object.entries(currentScraper.configurableFields).map(
+      ([key, fieldInfo]) => {
+        // 兼容旧的字符串格式和新的元组格式
+        const [label, type, tooltip] =
+          typeof fieldInfo === 'string'
+            ? [fieldInfo, 'string', '']
+            : fieldInfo
+        const camelKey = key.replace(/_([a-z])/g, g => g[1].toUpperCase())
+
+        // 跳过通用黑名单字段，因为它在下面有专门的渲染逻辑
+        if (key.endsWith('_episode_blacklist_regex')) {
+          return null
+        }
+
+        switch (type) {
+          case 'boolean':
+            return (
+              <Form.Item
+                key={camelKey}
+                name={camelKey}
+                label={label}
+                valuePropName="checked"
+                className="mb-4"
+                tooltip={tooltip}
+              >
+                <Switch />
+              </Form.Item>
+            )
+          case 'string':
+            // 为 gamer 的 cookie 提供更大的输入框
+            if (key === 'gamerCookie') {
+              return (
+                <Form.Item
+                  key={camelKey}
+                  name={camelKey}
+                  label={label}
+                  className="mb-4"
+                  tooltip={tooltip}
+                >
+                  <Input.TextArea rows={4} />
+                </Form.Item>
+              )
+            }
+            return (
+              <Form.Item
+                key={camelKey}
+                name={camelKey}
+                label={label}
+                className="mb-4"
+                tooltip={tooltip}
+              >
+                <Input />
+              </Form.Item>
+            )
+          case 'password':
+            return (
+              <Form.Item
+                key={camelKey}
+                name={camelKey}
+                label={label}
+                className="mb-4"
+                tooltip={tooltip}
+              >
+                <Input.Password />
+              </Form.Item>
+            )
+          default:
+            return null
+        }
+      }
+    )
+  }
+
   return (
     <div className="my-6">
       <Card loading={loading} title="弹幕搜索源">
@@ -402,7 +480,7 @@ export const Scrapers = () => {
         >
           <SortableContext
             strategy={verticalListSortingStrategy}
-            items={list.map((item, index) => item.id || `item-${index}`)}
+            items={list.map(item => item.providerName)}
           >
             <List
               itemLayout="vertical"
@@ -410,7 +488,7 @@ export const Scrapers = () => {
               dataSource={list}
               renderItem={(item, index) => (
                 <SortableItem
-                  key={item.id || index}
+                  key={item.providerName}
                   item={item}
                   index={index}
                   biliUserinfo={biliUserinfo}
@@ -433,6 +511,8 @@ export const Scrapers = () => {
         cancelText="取消"
         okText="确认"
         onCancel={() => setOpen(false)}
+        destroyOnClose // 确保每次打开时都重新渲染
+        forceRender // 确保表单项在Modal打开时就存在
       >
         <Form form={form} layout="vertical">
           <div className="mb-4">请为 {setname} 源填写以下配置信息。</div>
@@ -444,25 +524,10 @@ export const Scrapers = () => {
           >
             <Switch />
           </Form.Item>
-          {/* gamer ua cookie */}
-          {setname === 'gamer' && (
-            <>
-              <Form.Item
-                name={`${setname}Cookie`}
-                label="Cookie"
-                className="mb-4"
-              >
-                <Input.TextArea />
-              </Form.Item>
-              <Form.Item
-                name={`${setname}UserAgent`}
-                label="User-Agent"
-                className="mb-4"
-              >
-                <Input />
-              </Form.Item>
-            </>
-          )}
+
+          {/* 动态渲染表单项 */}
+          {renderDynamicFormItems()}
+
           {/* 通用部分 分集标题黑名单 记录原始响应 */}
           <Form.Item
             name={`${setname}EpisodeBlacklistRegex`}

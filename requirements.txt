@@ -32,3 +32,5 @@ opencc-python-reimplemented
 cryptography
 # 用于SM2/SM3/SM4国密算法
 gmssl
+brotli
+requests

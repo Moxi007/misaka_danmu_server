@@ -1,6 +1,17 @@
-import { Button, Card, Form, Input, List, message, Tag, Tooltip } from 'antd'
+import {
+  Button,
+  Card,
+  Form,
+  Input,
+  List,
+  message,
+  Modal,
+  Switch,
+  Tag,
+  Tooltip,
+} from 'antd'
 import { useEffect, useState, useRef } from 'react'
-import { getMetaData, setMetaData } from '../../../apis'
+import { getMetaData, getProviderConfig, setMetaData, setProviderConfig } from '../../../apis'
 import { MyIcon } from '@/components/MyIcon'
 import {
   closestCorners,
@@ -20,7 +31,7 @@ import { CSS } from '@dnd-kit/utilities'
 import { ContainerOutlined } from '@ant-design/icons'
 import { useMessage } from '../../../MessageContext'
 
-const SortableItem = ({ item, index, handleChangeStatus }) => {
+const SortableItem = ({ item, index, handleChangeStatus, onConfig }) => {
   const {
     attributes,
     listeners,
@@ -29,7 +40,8 @@ const SortableItem = ({ item, index, handleChangeStatus }) => {
     transition,
     isDragging,
   } = useSortable({
-    id: item.id || `item-${index}`, // 使用item.id或索引作为唯一标识
+    // 修正：始终使用 providerName 作为唯一 ID
+    id: item.providerName,
     data: {
       item,
       index,
@@ -58,7 +70,11 @@ const SortableItem = ({ item, index, handleChangeStatus }) => {
           </div>
           <div>{item.providerName}</div>
         </div>
-        <div className="flex items-center justify-around gap-4">
+        <div className="flex items-center justify-around gap-3">
+          {/* 新增：配置按钮 */}
+          <div onClick={onConfig} className="cursor-pointer">
+            <MyIcon icon="setting" size={24} />
+          </div>
           {item.status !== '未配置' && (
             <Tooltip title={item.status} trigger={['click', 'hover']}>
               <ContainerOutlined
@@ -95,6 +111,10 @@ export const Metadata = () => {
   const [list, setList] = useState([])
   const [activeItem, setActiveItem] = useState(null)
   const dragOverlayRef = useRef(null)
+  const [isModalOpen, setIsModalOpen] = useState(false)
+  const [selectedSource, setSelectedSource] = useState(null)
+  const [form] = Form.useForm()
+  const [confirmLoading, setConfirmLoading] = useState(false)
 
   const messageApi = useMessage()
 
@@ -112,7 +132,8 @@ export const Metadata = () => {
     })
   )
 
-  useEffect(() => {
+  const fetchInfo = () => {
+    setLoading(true)
     getMetaData()
       .then(res => {
         setList(res.data ?? [])
@@ -120,7 +141,26 @@ export const Metadata = () => {
       .finally(() => {
         setLoading(false)
       })
-  }, [])
+  }
+
+  useEffect(fetchInfo, [])
+
+  useEffect(() => {
+    if (isModalOpen && selectedSource?.providerName) {
+      // 重置表单以防显示旧数据
+      form.resetFields()
+      getProviderConfig({ providerName: selectedSource.providerName })
+        .then(res => {
+          form.setFieldsValue({
+            ...res.data,
+            logRawResponses: res.data.logRawResponses ?? false,
+          })
+        })
+        .catch(() => {
+          messageApi.error('获取配置失败')
+        })
+    }
+  }, [isModalOpen, selectedSource, form, messageApi])
 
   const handleDragEnd = event => {
     const { active, over } = event
@@ -152,9 +192,14 @@ export const Metadata = () => {
       }))
 
       // 3. 更新状态
-      console.log(updatedList, 'updatedList')
       setList(updatedList)
-      setMetaData(updatedList)
+      // 修正：只发送必要的字段，避免发送status等只读字段
+      const payload = updatedList.map(item => ({
+        providerName: item.providerName,
+        isAuxSearchEnabled: item.isAuxSearchEnabled,
+        displayOrder: item.displayOrder,
+      }))
+      setMetaData(payload)
       messageApi.success(
         `已更新排序，${movedItem.providerName} 移动到位置 ${overIndex + 1}`
       )
@@ -167,9 +212,7 @@ export const Metadata = () => {
   const handleDragStart = event => {
     const { active } = event
     // 找到当前拖拽的项
-    const item = list.find(
-      item => (item.id || `item-${list.indexOf(item)}`) === active.id
-    )
+    const item = list.find(item => item.providerName === active.id)
     setActiveItem(item)
   }
 
@@ -178,14 +221,37 @@ export const Metadata = () => {
       if (it.providerName === item.providerName) {
         return {
           ...it,
-          isAuxSearchEnabled: Number(!it.isAuxSearchEnabled),
+          isAuxSearchEnabled: !it.isAuxSearchEnabled,
         }
       } else {
         return it
       }
     })
     setList(newList)
-    setMetaData(newList)
+    const payload = newList.map(item => ({
+      providerName: item.providerName,
+      isAuxSearchEnabled: item.isAuxSearchEnabled,
+      displayOrder: item.displayOrder,
+    }))
+    setMetaData(payload)
+  }
+
+  const handleSaveSettings = async () => {
+    try {
+      setConfirmLoading(true)
+      const values = await form.validateFields()
+      await setProviderConfig(selectedSource.providerName, {
+        ...values,
+      })
+      messageApi.success('保存成功')
+      setIsModalOpen(false)
+      // 成功后刷新列表以更新状态
+      fetchInfo()
+    } catch (error) {
+      messageApi.error(`保存失败: ${error.message || '未知错误'}`)
+    } finally {
+      setConfirmLoading(false)
+    }
   }
 
   const renderDragOverlay = () => {
@@ -246,7 +312,7 @@ export const Metadata = () => {
         >
           <SortableContext
             strategy={verticalListSortingStrategy}
-            items={list.map((item, index) => item.id || `item-${index}`)}
+            items={list.map(item => item.providerName)}
           >
             <List
               itemLayout="vertical"
@@ -254,10 +320,14 @@ export const Metadata = () => {
               dataSource={list}
               renderItem={(item, index) => (
                 <SortableItem
-                  key={item.id || index}
+                  key={item.providerName}
                   item={item}
                   index={index}
                   handleChangeStatus={() => handleChangeStatus(item)}
+                  onConfig={() => {
+                    setSelectedSource(item)
+                    setIsModalOpen(true)
+                  }}
                 />
               )}
             />
@@ -267,6 +337,58 @@ export const Metadata = () => {
           <DragOverlay>{renderDragOverlay()}</DragOverlay>
         </DndContext>
       </Card>
+      <Modal
+        title={`配置: ${selectedSource?.providerName}`}
+        open={isModalOpen}
+        onOk={handleSaveSettings}
+        onCancel={() => setIsModalOpen(false)}
+        confirmLoading={confirmLoading}
+        destroyOnClose
+        forceRender
+      >
+        <Form
+          form={form}
+          layout="vertical"
+          initialValues={{ logRawResponses: false }}
+        >
+          <div className="my-4">
+            请为 {selectedSource?.providerName} 源填写以下配置信息。
+          </div>
+          <div className="flex items-center justify-start flex-wrap md:flex-nowrap gap-2 mb-4">
+            <Form.Item
+              name="logRawResponses"
+              label="记录原始响应"
+              valuePropName="checked"
+              className="min-w-[100px] shrink-0 !mb-0"
+            >
+              <Switch />
+            </Form.Item>
+            <div className="w-full text-gray-500">
+              启用后，此源的所有API请求的原始响应将被记录到{' '}
+              <code>config/logs/metadata_responses.log</code> 文件中，用于调试。
+            </div>
+        </div>
+          {/* 修正：根据后端返回的 isFailoverSource 标志来决定是否显示此开关 */}
+          {form.getFieldValue('isFailoverSource') && (
+            <div className="flex items-center justify-start flex-wrap md:flex-nowrap gap-2 mb-4">
+              <Form.Item
+                name="forceAuxSearchEnabled"
+                label="强制辅助搜索"
+                valuePropName="checked"
+                className="min-w-[100px] shrink-0 !mb-0"
+              >
+                <Switch />
+              </Form.Item>
+              <div
+                className="w-full text-gray-500"
+                title="启用后，在搜索时，此源将作为一个补充搜索源。如果其他弹幕源没有找到结果，或结果不佳，此源的结果将作为备选项显示在搜索结果中。"
+              >
+                启用后，此源将作为补充搜索源。当其他弹幕源结果不佳时，其结果将作为备选项显示。
+              </div>
+            </div>
+          )}
+        </Form>
+      </Modal>
     </div>
   )
 }

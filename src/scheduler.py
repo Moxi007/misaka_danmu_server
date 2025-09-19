@@ -164,34 +164,47 @@ class SchedulerManager:
                     except Exception as e:
                         logger.error(f"加载定时任务 '{task['name']}' (ID: {task['taskId']}) 失败: {e}")
 
+    def _is_system_task(self, job_type: str) -> bool:
+        """通过Job类判断是否为系统任务"""
+        if job_type in self._job_classes:
+            return getattr(self._job_classes[job_type], 'is_system_task', False)
+        return False
+
     async def get_all_tasks(self) -> List[Dict[str, Any]]:
-        """从数据库获取所有定时任务的列表。"""
+        """从数据库获取所有定时任务的列表，并标记系统任务。"""
         async with self._session_factory() as session:
-            return await crud.get_scheduled_tasks(session)
+            tasks = await crud.get_scheduled_tasks(session)
+            # 为每个任务添加系统任务标识
+            for task in tasks:
+                task['isSystemTask'] = self._is_system_task(task['jobType'])
+            return tasks
 
     async def add_task(self, name: str, job_type: str, cron: str, is_enabled: bool) -> Dict[str, Any]:
+        # 新增：禁止前端创建系统内置任务
+        if job_type == "tokenReset":
+            raise ValueError("系统内置任务 'tokenReset' 不允许手动创建。")
+        
         if job_type not in self._job_classes:
             raise ValueError(f"未知的任务类型: {job_type}")
+        
         # 确保增量更新任务的轮询间隔不低于3小时
         if job_type == "incrementalRefresh" and not cron_is_valid(cron, 3):
             raise ValueError("定时增量更新任务的轮询间隔不得低于3小时。请使用如 '0 */3 * * *' (每3小时) 或更长的间隔。")
         
-        # 新增：确保“定时追更”任务只能创建一个
+        # 确保某些任务类型只能创建一个
         async with self._session_factory() as session:
             if job_type == "incrementalRefresh":
                 exists = await crud.check_scheduled_task_exists_by_type(session, "incrementalRefresh")
                 if exists:
-                    raise ValueError("“定时追更”任务已存在，无法重复创建。")
+                    raise ValueError("定时追更任务已存在，无法重复创建。")
             elif job_type == "tmdbAutoMap":
                 exists = await crud.check_scheduled_task_exists_by_type(session, "tmdbAutoMap")
                 if exists:
-                    raise ValueError("“TMDB自动映射与更新”任务已存在，无法重复创建。")
-
-            # 新增：确保 Webhook 处理器任务只能创建一个
-            if job_type == "webhookProcessor":
+                    raise ValueError("TMDB自动映射与更新任务已存在，无法重复创建。")
+            elif job_type == "webhookProcessor":
                 exists = await crud.check_scheduled_task_exists_by_type(session, "webhookProcessor")
                 if exists:
-                    raise ValueError("“Webhook 延时任务处理器”已存在，无法重复创建。")
+                    raise ValueError("Webhook 延时任务处理器已存在，无法重复创建。")
 
             task_id = str(uuid4())
             await crud.create_scheduled_task(session, task_id, name, job_type, cron, is_enabled)
@@ -204,15 +217,15 @@ class SchedulerManager:
 
     async def update_task(self, task_id: str, name: str, cron: str, is_enabled: bool) -> Optional[Dict[str, Any]]:
         async with self._session_factory() as session:
-            job = self.scheduler.get_job(task_id)
-            if not job: return None
-
             task_info = await crud.get_scheduled_task(session, task_id)
             if not task_info: return None
-            job_type = task_info['jobType']
-
+            
+            # 新增：防止修改系统任务
+            if self._is_system_task(task_info['jobType']):
+                raise ValueError("系统内置任务不允许修改")
+            
             # 确保增量更新任务的轮询间隔不低于3小时
-            if job_type == "incrementalRefresh" and not cron_is_valid(cron, 3):
+            if task_info['jobType'] == "incrementalRefresh" and not cron_is_valid(cron, 3):
                 raise ValueError("定时增量更新任务的轮询间隔不得低于3小时。请使用如 '0 */3 * * *' (每3小时) 或更长的间隔。")
             await crud.update_scheduled_task(session, task_id, name, cron, is_enabled)
             job.modify(name=name)
@@ -223,21 +236,44 @@ class SchedulerManager:
             await crud.update_scheduled_task_run_times(session, task_id, task_info['lastRunAt'], next_run_time)
             return await crud.get_scheduled_task(session, task_id)
 
-    async def delete_task(self, task_id: str):
-        if self.scheduler.get_job(task_id): self.scheduler.remove_job(task_id)
+    async def delete_task(self, task_id: str) -> bool:
         async with self._session_factory() as session:
+            task_info = await crud.get_scheduled_task(session, task_id)
+            if not task_info: return False
+            
+            # 新增：防止删除系统任务
+            if self._is_system_task(task_info['jobType']):
+                raise ValueError("系统内置任务不允许删除")
+            
+            if self.scheduler.get_job(task_id): self.scheduler.remove_job(task_id)
             await crud.delete_scheduled_task(session, task_id)
+            return True
 
     async def run_task_now(self, task_id: str):
-        if job := self.scheduler.get_job(task_id):
-            job.modify(next_run_time=datetime.now(self.scheduler.timezone))
-        else:
-            raise ValueError("找不到指定的任务ID")
+        """立即运行指定的定时任务"""
+        async with self._session_factory() as session:
+            task_info = await crud.get_scheduled_task(session, task_id)
+            if not task_info:
+                raise ValueError(f"找不到ID为 '{task_id}' 的定时任务")
+            
+            # 新增：防止手动运行系统任务
+            if self._is_system_task(task_info['jobType']):
+                raise ValueError("系统内置任务不允许手动运行")
+
+        job = self.scheduler.get_job(task_id)
+        if not job:
+            raise ValueError(f"调度器中找不到ID为 '{task_id}' 的任务")
+
+        # 修正：直接使用数据库中的 jobType，而不是从 job.func.keywords 获取
+        runner = self._create_job_runner(task_info['jobType'], task_id)
+        await runner()
 
     async def run_task_now_by_type(self, job_type: str):
-        """
-        根据任务类型查找任务并立即运行它。
-        """
+        """根据任务类型查找任务并立即运行它。"""
+        # 新增：防止手动运行系统任务类型
+        if self._is_system_task(job_type):
+            raise ValueError("系统内置任务不允许手动运行")
+            
         async with self._session_factory() as session:
             task_id = await crud.get_scheduled_task_id_by_type(session, job_type)
         
@@ -245,3 +281,6 @@ class SchedulerManager:
             raise ValueError(f"找不到类型为 '{job_type}' 的定时任务")
 
         await self.run_task_now(task_id)    
+
+
+

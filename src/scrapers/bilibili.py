@@ -470,6 +470,9 @@ class BilibiliScraper(BaseScraper):
         if cached_results:
             self.logger.info(f"Bilibili: 从缓存中命中基础搜索结果 (title='{search_title}')")
             all_results = [models.ProviderSearchInfo.model_validate(r) for r in cached_results]
+            # 修复：为缓存结果设置正确的currentEpisodeIndex
+            for item in all_results:
+                item.currentEpisodeIndex = episode_info.get("episode") if episode_info else None
         else:
             self.logger.info(f"Bilibili: 缓存未命中，正在为标题 '{search_title}' 执行网络搜索...")
             all_results = await self._perform_network_search(search_title, episode_info)

@@ -3,10 +3,10 @@ import { RoutePaths } from './RoutePaths.jsx'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { useAtom, useAtomValue } from 'jotai'
 import { isMobileAtom, userinfoAtom } from '../../store/index.js'
-import DarkModeToggle from '@/components/DarkModeToggle.jsx'
+import DarkModeToggle from '@/components/DarkModeToggle.jsx';
 import { MyIcon } from '@/components/MyIcon'
 import classNames from 'classnames'
-import { Dropdown, Tag } from 'antd'
+import { Dropdown, Tag } from 'antd';
 import { logout } from '../apis/index.js'
 import Cookies from 'js-cookie'
 
@@ -19,11 +19,13 @@ const navItems = [
   { key: RoutePaths.CONTROL, label: '外部控制', icon: 'controlapi' },
   { key: RoutePaths.SETTING, label: '设置', icon: 'setting' },
 ]
-const version = 'v2.0.10'
+import { getVersion } from '../apis/index.js';
 
 export const Header = () => {
   const [isMobile, setIsMobile] = useAtom(isMobileAtom)
   const location = useLocation()
+  const navigate = useNavigate()
+  const [version, setVersion] = useState('N/A');
   console.log(location)
 
   const activeKey = useMemo(() => {
@@ -35,6 +37,13 @@ export const Header = () => {
     )
   }, [location, navItems])
 
+  useEffect(() => {
+    const fetchVersion = async () => {
+      const res = await getVersion();
+      setVersion(`v${res.data.version}`);
+    };
+    fetchVersion();
+  }, []);
   useEffect(() => {
     const checkScreenSize = () => {
       setIsMobile(window.innerWidth <= 768)
@@ -64,7 +73,7 @@ export const Header = () => {
           <MobileHeader activeKey={activeKey} />
         </>
       ) : (
-        <DesktopHeader activeKey={activeKey} />
+        <DesktopHeader activeKey={activeKey} version={version} />
       )}
     </>
   )
@@ -163,7 +172,7 @@ const MobileHeader = ({ activeKey }) => {
   )
 }
 
-const DesktopHeader = ({ activeKey }) => {
+const DesktopHeader = ({ activeKey, version }) => {
   const navigate = useNavigate()
   const userinfo = useAtomValue(userinfoAtom)
 

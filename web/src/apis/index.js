@@ -1,5 +1,8 @@
 import api from './fetch'
 
+/** 获取应用版本号 */
+export const getVersion = () => api.get('/api/ui/version')
+
 /** -------------------------------------------------用户相关开始------------------------------------------------- */
 /** 登录 */
 export const login = data =>
@@ -193,6 +196,13 @@ export const getDanmuOutputAggregation = () =>
 export const setDanmuOutputAggregation = data =>
   api.put('/api/ui/config/danmaku_aggregation_enabled', data)
 
+/** 获取匹配后备机制状态 */
+export const getMatchFallback = () =>
+  api.get('/api/ui/config/matchFallbackEnabled')
+/** 设置匹配后备机制状态 */
+export const setMatchFallback = data =>
+  api.put('/api/ui/config/matchFallbackEnabled', data)
+
 /** ---------------------------------------------- webhook ----------------------------------------------*/
 /** 获取webhook apikey */
 export const getWebhookApikey = () => api.get('/api/ui/config/webhookApiKey')
@@ -282,6 +292,13 @@ export const getMetaData = () => api.get('/api/ui/metadata-sources')
 /** 设置元数据 配置 */
 export const setMetaData = data => api.put('/api/ui/metadata-sources', data)
 
+/** 获取单个元数据源的配置 (新) */
+export const getProviderConfig = data =>
+  api.get(`/api/ui/metadata-sources/${data.providerName}/config`)
+
+/** 设置单个元数据源的配置 (新) */
+export const setProviderConfig = (providerName, data) =>
+  api.put(`/api/ui/metadata-sources/${providerName}/config`, data)
 /** ---------------------------------------------- 全局过滤设置 ----------------------------------------------  */
 /** 获取全局过滤规则 */
 export const getGlobalFilter = () =>

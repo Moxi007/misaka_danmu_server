@@ -19,7 +19,7 @@ export const TVDB = () => {
     setLoading(true)
     getTvdbConfig()
       .then(res => {
-        form.setFieldsValue({ tvdbApiKey: res.data?.value ?? '' })
+        form.setFieldsValue({ tvdbApiKey: res.data?.tvdbApiKey ?? '' })
       })
       .finally(() => {
         setLoading(false)
@@ -31,7 +31,7 @@ export const TVDB = () => {
       setIsSaveLoading(true)
       const values = await form.validateFields()
       await setTvdbConfig({
-        value: values.tvdbApiKey,
+        tvdbApiKey: values.tvdbApiKey,
       })
       setIsSaveLoading(false)
       messageApi.success('保存成功')

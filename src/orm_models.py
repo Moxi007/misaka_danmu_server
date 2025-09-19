@@ -114,6 +114,7 @@ class MetadataSource(Base):
     displayOrder: Mapped[int] = mapped_column("display_order", Integer, default=0)
     useProxy: Mapped[bool] = mapped_column("use_proxy", Boolean, default=False)
     isFailoverEnabled: Mapped[bool] = mapped_column("is_failover_enabled", Boolean, default=False)
+    logRawResponses: Mapped[bool] = mapped_column("log_raw_responses", Boolean, default=False, nullable=False)
 
 class AnimeMetadata(Base):
     __tablename__ = "anime_metadata"

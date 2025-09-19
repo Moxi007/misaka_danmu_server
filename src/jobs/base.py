@@ -14,8 +14,9 @@ class BaseJob(ABC):
     所有定时任务的抽象基类。
     """
     # 每个子类都必须覆盖这些类属性
-    job_type: str # 任务的唯一标识符, e.g., "incremental_refresh"
-    job_name: str # 任务的默认显示名称, e.g., "TMDB自动映射与更新"
+    job_type: str = "" # 任务的唯一标识符, e.g., "incremental_refresh"
+    job_name: str = "" # 任务的默认显示名称, e.g., "TMDB自动映射与更新"
+    is_system_task: bool = False  # 新增：标识是否为系统内置任务
 
     def __init__(self, session_factory: async_sessionmaker[AsyncSession], task_manager: TaskManager, scraper_manager: ScraperManager, rate_limiter: RateLimiter, metadata_manager: MetadataSourceManager, config_manager: ConfigManager):
         self._session_factory = session_factory

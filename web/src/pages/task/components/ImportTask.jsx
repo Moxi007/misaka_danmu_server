@@ -20,6 +20,7 @@ import {
   Space,
   Tag,
   Tooltip,
+  Dropdown,
 } from 'antd'
 import {
   CheckOutlined,
@@ -28,6 +29,7 @@ import {
   PauseOutlined,
   StepBackwardOutlined,
   StopOutlined,
+  FilterOutlined,
 } from '@ant-design/icons'
 import classNames from 'classnames'
 import { useModal } from '../../../ModalContext'
@@ -263,6 +265,29 @@ export const ImportTask = () => {
     }
   }, [pollTasks])
 
+  // 状态筛选菜单
+  const statusMenu = {
+    items: [
+      { key: 'in_progress', label: '进行中' },
+      { key: 'completed', label: '已完成' },
+      { key: 'all', label: '全部' },
+    ],
+    onClick: ({ key }) => {
+      navigate(`/task?search=${search}&status=${key}`, {
+        replace: true,
+      })
+    },
+  }
+
+  const getStatusLabel = (status) => {
+    switch (status) {
+      case 'in_progress': return '进行中'
+      case 'completed': return '已完成'
+      case 'all': return '全部'
+      default: return '进行中'
+    }
+  }
+
   return (
     <div className="my-6">
       <Card
@@ -270,6 +295,11 @@ export const ImportTask = () => {
         title="任务管理器"
         extra={
           <Space>
+            <Dropdown menu={statusMenu}>
+              <Button icon={<FilterOutlined />}>
+                {getStatusLabel(status)}
+              </Button>
+            </Dropdown>
             <Tooltip title="全选/取消全选">
               <Button
                 type="default"
@@ -335,44 +365,6 @@ export const ImportTask = () => {
           </Space>
         }
       >
-        <div className="flex items-center justify-center gap-4 py-3 text-base font-semibold">
-          <div
-            className={classNames('cursor-pointer px-3 py-1 rounded-full', {
-              'bg-primary text-white': status === 'all',
-            })}
-            onClick={() => {
-              navigate(`/task?search=${search}&status=all`, {
-                replace: true,
-              })
-            }}
-          >
-            全部
-          </div>
-          <div
-            className={classNames('cursor-pointer px-3 py-1 rounded-full', {
-              'bg-primary text-white': status === 'completed',
-            })}
-            onClick={() => {
-              navigate(`/task?search=${search}&status=completed`, {
-                replace: true,
-              })
-            }}
-          >
-            已完成
-          </div>
-          <div
-            className={classNames('cursor-pointer px-3 py-1 rounded-full', {
-              'bg-primary text-white': status === 'in_progress',
-            })}
-            onClick={() => {
-              navigate(`/task?search=${search}&status=in_progress`, {
-                replace: true,
-              })
-            }}
-          >
-            进行中
-          </div>
-        </div>
         <div>
           {!!taskList?.length ? (
             <List

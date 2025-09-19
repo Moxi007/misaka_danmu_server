@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 import logging
-from typing import Any, Dict, List, Optional, Set, Type
+from typing import Any, Dict, List, Optional, Set, Type,Tuple
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker # type: ignore
 from fastapi import Request
@@ -15,6 +15,8 @@ class BaseMetadataSource(ABC):
 
     # 每个子类必须定义自己的提供商名称
     provider_name: str
+    # 新增：声明可配置字段 { "db_key": ("UI标签", "类型", "提示") }
+    configurable_fields: Dict[str, Tuple[str, str, str]] = {}
 
     def __init__(self, session_factory: async_sessionmaker[AsyncSession], config_manager: ConfigManager, scraper_manager: ScraperManager):
         self._session_factory = session_factory

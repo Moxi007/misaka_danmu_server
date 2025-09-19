@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union, Tuple
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -103,6 +103,7 @@ class MetadataDetailsResponse(BaseModel):
     aliasesCn: List[str] = []
     imageUrl: Optional[str] = None
     details: Optional[str] = None
+    year: Optional[int] = None
 
 class AnimeCreate(BaseModel):
     """Model for creating a new anime entry manually."""
@@ -188,8 +189,6 @@ class ScraperSetting(BaseModel):
 class MetadataSourceSettingUpdate(BaseModel):
     providerName: str
     isAuxSearchEnabled: bool
-    useProxy: bool
-    isFailoverEnabled: bool
     displayOrder: int
 
 
@@ -375,11 +374,11 @@ class MetadataSourceStatusResponse(BaseModel):
     status: str
     useProxy: bool
     isFailoverEnabled: bool
+    logRawResponses: bool = Field(False, alias="log_raw_responses")
 
 class ScraperSettingWithConfig(ScraperSetting):
-    configurableFields: Optional[Dict[str, str]] = None
+    configurableFields: Optional[Dict[str, Union[str, Tuple[str, str, str]]]] = None
     isLoggable: bool
-    isVerified: bool
 
 class ProxySettingsResponse(BaseModel):
     proxyProtocol: str

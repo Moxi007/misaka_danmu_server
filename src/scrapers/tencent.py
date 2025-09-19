@@ -317,7 +317,7 @@ class TencentScraper(BaseScraper):
             await self.client.aclose()
             self.client = None
 
-    async def _filter_search_item(self, item: TencentSearchItem, keyword: str) -> Optional[models.ProviderSearchInfo]:
+    async def _filter_search_item(self, item: TencentSearchItem, keyword: str, episode_info: Optional[Dict[str, Any]] = None) -> Optional[models.ProviderSearchInfo]:
         """
         Ported from JS: processSearchItemQuick, focusing on filtering.
         Processes a single search item and applies filtering rules.
@@ -412,10 +412,10 @@ class TencentScraper(BaseScraper):
             year=int(year) if year else None,
             imageUrl=cover_url,
             episodeCount=episode_count,
-            currentEpisodeIndex=None # This is a quick search, detailed episode info is fetched later
+            currentEpisodeIndex=episode_info.get("episode") if episode_info else None
         )
 
-    async def _search_with_payload(self, keyword: str, payload: Dict[str, Any], headers: Optional[Dict[str, str]] = None) -> List[models.ProviderSearchInfo]:
+    async def _search_with_payload(self, keyword: str, payload: Dict[str, Any], headers: Optional[Dict[str, str]] = None, episode_info: Optional[Dict[str, Any]] = None) -> List[models.ProviderSearchInfo]:
         url = "https://pbaccess.video.qq.com/trpc.videosearch.mobile_search.HttpMobileRecall/MbSearchHttp"
         results = []
         try:
@@ -430,7 +430,7 @@ class TencentScraper(BaseScraper):
             data = TencentSearchResult.model_validate(response_json)
 
             if data.data and data.data.normal_list:
-                tasks = [self._filter_search_item(item, keyword) for item in data.data.normal_list.item_list]
+                tasks = [self._filter_search_item(item, keyword, episode_info) for item in data.data.normal_list.item_list]
                 filtered_items = await asyncio.gather(*tasks)
                 for filtered_item in filtered_items:
                     if filtered_item:
@@ -496,7 +496,7 @@ class TencentScraper(BaseScraper):
                 self.logger.debug("Tencent (MultiTerminal API): MainNeed box 未找到或为空, 回退到 normalList。")
                 items_to_process.extend(data.data.normalList.item_list)
 
-            tasks = [self._filter_search_item(item, keyword) for item in items_to_process]
+            tasks = [self._filter_search_item(item, keyword, episode_info) for item in items_to_process]
             filtered_items = await asyncio.gather(*tasks)
             for filtered_item in filtered_items:
                 if filtered_item:
@@ -518,6 +518,9 @@ class TencentScraper(BaseScraper):
         if cached_results:
             self.logger.info(f"Tencent: 从缓存中命中基础搜索结果 (title='{search_title}')")
             all_results = [models.ProviderSearchInfo.model_validate(r) for r in cached_results]
+            # 修复：为缓存结果设置正确的currentEpisodeIndex
+            for item in all_results:
+                item.currentEpisodeIndex = episode_info.get("episode") if episode_info else None
         else:
             self.logger.info(f"Tencent: 缓存未命中，正在为标题 '{search_title}' 执行网络搜索...")
             all_results = await self._perform_network_search(search_title, episode_info)

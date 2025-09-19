@@ -1,6 +1,7 @@
 import { Tabs } from 'antd'
 import { TokenManage } from './components/TokenManage'
 import { OutputManage } from './components/OutputManage'
+import { MatchFallbackSetting } from './components/MatchFallbackSetting'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 
 export const Bullet = () => {
@@ -21,6 +22,11 @@ export const Bullet = () => {
           label: '弹幕输出控制',
           key: 'output',
           children: <OutputManage />,
+        },
+        {
+          label: '设置',
+          key: 'fallback',
+          children: <MatchFallbackSetting />,
         },
       ]}
       onChange={key => {

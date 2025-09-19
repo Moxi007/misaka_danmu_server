@@ -12,7 +12,7 @@ from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, JSON
 from fastapi.middleware.cors import CORSMiddleware  # 新增：处理跨域
 import json
 from .config_manager import ConfigManager
-from .database import init_db_tables, close_db_engine, create_initial_admin_user # type: ignore
+from .database import init_db_tables, close_db_engine, create_initial_admin_user
 from .api import api_router, control_router
 from .dandan_api import dandan_router
 from .task_manager import TaskManager
@@ -21,9 +21,10 @@ from .scraper_manager import ScraperManager
 from .webhook_manager import WebhookManager
 from .scheduler import SchedulerManager
 from .config import settings
-from . import crud, security
+from . import crud, security, orm_models  # 添加 orm_models 导入
 from .log_manager import setup_logging
 from .rate_limiter import RateLimiter
+from ._version import APP_VERSION
 
 print(f"当前环境: {settings.environment}") 
 
@@ -38,6 +39,9 @@ async def lifespan(app: FastAPI):
     """
     # --- Startup Logic ---
     setup_logging()
+
+    # 新增：在日志系统初始化后立即打印版本号
+    logger.info(f"Misaka Danmaku API 版本 {APP_VERSION} 正在启动...")
 
     # init_db_tables 现在处理数据库创建、引擎和会话工厂的创建
     await init_db_tables(app)
@@ -92,6 +96,8 @@ async def lifespan(app: FastAPI):
         'scraperVerificationEnabled': ('false', '是否启用搜索源签名验证。'),
         'bilibiliCookie': ('', '用于访问B站API的Cookie，特别是buvid3。'),
         'gamerCookie': ('', '用于访问巴哈姆特动画疯的Cookie。'),
+        'matchFallbackEnabled': ('false', '是否为匹配接口启用后备机制（自动搜索导入）。'),
+        'iqiyiUseProtobuf': ('false', '（爱奇艺）是否使用新的Protobuf弹幕接口（实验性）。'),
         'gamerUserAgent': ('', '用于访问巴哈姆特动画疯的User-Agent。'),
         # 全局过滤
         'search_result_global_blacklist_cn': (r'特典|预告|广告|菜单|花絮|特辑|速看|资讯|彩蛋|直拍|直播回顾|片头|片尾|幕后|映像|番外篇|纪录片|访谈|番外|短片|加更|走心|解忧|纯享|解读|揭秘|赏析', '用于过滤搜索结果标题的全局中文黑名单(正则表达式)。'),
@@ -127,6 +133,21 @@ async def lifespan(app: FastAPI):
     )
     app.state.task_manager.start()
     await create_initial_admin_user(app)
+    
+    # 新增：创建系统内置定时任务
+    async with session_factory() as session:
+        existing_task = await session.get(orm_models.ScheduledTask, "system_token_reset")
+        if not existing_task:
+            await crud.create_scheduled_task(
+                session, 
+                task_id="system_token_reset",
+                name="系统内置：Token每日重置",
+                job_type="tokenReset", 
+                cron="0 0 * * *",
+                is_enabled=True
+            )
+            logger.info("已创建系统内置定时任务：重置API Token每日调用次数")
+    
     app.state.cleanup_task = asyncio.create_task(cleanup_task(app))
     app.state.scheduler_manager = SchedulerManager(session_factory, app.state.task_manager, app.state.scraper_manager, app.state.rate_limiter, app.state.metadata_manager, app.state.config_manager)
     await app.state.scheduler_manager.start()

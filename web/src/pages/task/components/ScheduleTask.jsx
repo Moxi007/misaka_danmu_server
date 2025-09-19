@@ -72,7 +72,14 @@ export const ScheduleTask = () => {
         const jobType = availableJobTypes.find(
           job => job.jobType === record.jobType
         )
-        return <>{jobType?.name || record.jobType}</>
+        return (
+          <div className="flex items-center gap-2">
+            <span>{jobType?.name || record.jobType}</span>
+            {record.isSystemTask && (
+              <Tag color="blue" size="small">系统任务</Tag>
+            )}
+          </div>
+        )
       },
     },
     {
@@ -125,30 +132,39 @@ export const ScheduleTask = () => {
       width: 100,
       fixed: 'right',
       render: (_, record) => {
+        const isSystemTask = record.isSystemTask || false
+        
         return (
           <Space>
             <span
-              className="cursor-pointer hover:text-primary"
-              onClick={() => handleRun(record)}
+              className={`cursor-pointer ${isSystemTask ? 'text-gray-400 cursor-not-allowed' : 'hover:text-primary'}`}
+              onClick={() => !isSystemTask && handleRun(record)}
+              title={isSystemTask ? '系统任务不允许手动运行' : '立即运行'}
             >
               <MyIcon icon="canshuzhihang" size={20}></MyIcon>
             </span>
             <span
-              className="cursor-pointer hover:text-primary"
+              className={`cursor-pointer ${isSystemTask ? 'text-gray-400 cursor-not-allowed' : 'hover:text-primary'}`}
               onClick={() => {
-                form.setFieldsValue({
-                  ...record,
-                })
-                setAddOpen(true)
+                if (!isSystemTask) {
+                  form.setFieldsValue({
+                    ...record,
+                  })
+                  setAddOpen(true)
+                }
               }}
+              title={isSystemTask ? '系统任务不允许编辑' : '编辑任务'}
             >
               <MyIcon icon="edit" size={20}></MyIcon>
             </span>
             <span
-              className="cursor-pointer hover:text-primary"
+              className={`cursor-pointer ${isSystemTask ? 'text-gray-400 cursor-not-allowed' : 'hover:text-primary'}`}
               onClick={() => {
-                handleDelete(record)
+                if (!isSystemTask) {
+                  handleDelete(record)
+                }
               }}
+              title={isSystemTask ? '系统任务不允许删除' : '删除任务'}
             >
               <MyIcon icon="delete" size={20}></MyIcon>
             </span>

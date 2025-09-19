@@ -33,6 +33,7 @@ class YoukuSearchCommonData(BaseModel):
     show_id: str = Field(alias="showId")
     episode_total: int = Field(alias="episodeTotal")
     feature: str
+    cats: Optional[str] = None  # 新增：节目分类字段
     is_youku: int = Field(alias="isYouku")
     has_youku: int = Field(alias="hasYouku")
     poster_dto: Optional[YoukuPosterDTO] = Field(None, alias="posterDTO")
@@ -40,6 +41,7 @@ class YoukuSearchCommonData(BaseModel):
 
 class YoukuSearchComponent(BaseModel):
     common_data: Optional[YoukuSearchCommonData] = Field(None, alias="commonData")
+    component_map: Optional[Dict[str, Any]] = Field(None, alias="componentMap")
 
 class YoukuSearchResult(BaseModel):
     page_component_list: Optional[List[YoukuSearchComponent]] = Field(None, alias="pageComponentList")
@@ -50,23 +52,30 @@ class YoukuEpisodeInfo(BaseModel):
     title: str
     # 新增：添加 displayName 字段以捕获更完整的分集标题，特别是对于综艺节目
     display_name: Optional[str] = Field(None, alias="displayName")
-    duration: str
-    category: str
-    link: str
+    show_video_stage: Optional[str] = Field(None, alias="showVideoStage")
+    stage: Optional[str] = None
+    seq: Optional[str] = None
+    duration: Optional[str] = None
+    category: Optional[str] = None
+    link: Optional[str] = None
 
     @property
     def clean_display_name(self) -> Optional[str]:
         """返回一个移除了日期前缀的 displayName。"""
         if not self.display_name:
             return None
-        # 匹配 "YYYY-MM-DD : " 或 "MM-DD : " 格式的前缀并移除
-        return re.sub(r'^\d{2,4}-\d{2}-\d{2}\s*:\s*|^\d{2}-\d{2}\s*:\s*', '', self.display_name).strip()
+        # 修正：更新正则表达式以保留“第X期”部分，并进一步移除“上/中/下”部分。
+        # 新的模式会智能地区分两种情况：
+        # 1. 如果日期后跟着“第X期”，则只移除日期。
+        # 2. 如果日期后跟着冒号，则将日期和冒号一并移除。
+        pattern = r'^(?:\d{2,4}-\d{2}-\d{2}|\d{2}-\d{2})\s*(?=(?:第\d+期))|^(?:\d{2,4}-\d{2}-\d{2}|\d{2}-\d{2})\s*:\s*'
+        return re.sub(pattern, '', self.display_name).strip()
 
 
     @property
     def total_mat(self) -> int:
         try:
-            duration_float = float(self.duration)
+            duration_float = float(self.duration) if self.duration else 0.0
             return int(duration_float // 60) + 1
         except (ValueError, TypeError):
             return 0
@@ -191,6 +200,9 @@ class YoukuScraper(BaseScraper):
         if cached_results:
             self.logger.info(f"Youku: 从缓存中命中基础搜索结果 (title='{search_title}')")
             all_results = [models.ProviderSearchInfo.model_validate(r) for r in cached_results]
+            # 修复：为缓存结果设置正确的currentEpisodeIndex
+            for item in all_results:
+                item.currentEpisodeIndex = episode_info.get("episode") if episode_info else None
         else:
             self.logger.info(f"Youku: 缓存未命中，正在为标题 '{search_title}' 执行网络搜索...")
             all_results = await self._perform_network_search(search_title, episode_info)
@@ -236,6 +248,12 @@ class YoukuScraper(BaseScraper):
                 year = int(year_match.group(0)) if year_match else None
                 
                 cleaned_title = self.unused_words_reg.sub("", title).strip().replace(":", "：")
+                
+                # 新增：提取媒体类型并缓存
+                media_type_detected = self._extract_media_type_from_response(common_data)
+                media_type_cache_key = f"media_type_{common_data.show_id}"
+                await self._set_to_cache(media_type_cache_key, media_type_detected, 'episodes_ttl_seconds', 3600)
+                
                 media_type = "movie" if "电影" in common_data.feature else "tv_series"
                 
                 current_episode = episode_info.get("episode") if episode_info else None
@@ -252,6 +270,19 @@ class YoukuScraper(BaseScraper):
                     currentEpisodeIndex=current_episode
                 )
                 self.logger.debug(f"Youku: 创建的 ProviderSearchInfo: {provider_search_info.model_dump_json(indent=2)}")
+
+                # 新增：缓存从搜索结果中获取的详细分集列表
+                if component.component_map and "1052" in component.component_map:
+                    episodes_component = component.component_map["1052"]
+                    if episodes_component and "data" in episodes_component:
+                        raw_episode_list = episodes_component["data"]
+                        show_id = common_data.show_id
+                        # 缓存键应与 get_episodes 中的逻辑匹配
+                        ep_cache_key = f"episodes_from_search_{show_id}"
+                        # 直接缓存原始的字典列表，在 get_episodes 中进行解析
+                        await self._set_to_cache(ep_cache_key, raw_episode_list, 'episodes_ttl_seconds', 3600)
+                        self.logger.info(f"Youku: 缓存了来自搜索的 {len(raw_episode_list)} 个详细分集 (show_id={show_id})")
+
                 results.append(provider_search_info)
 
         except (httpx.TimeoutException, httpx.ConnectError) as e:
@@ -307,54 +338,16 @@ class YoukuScraper(BaseScraper):
     async def get_episodes(self, media_id: str, target_episode_index: Optional[int] = None, db_media_type: Optional[str] = None) -> List[models.ProviderEpisodeInfo]:
         # 优酷的逻辑不区分电影和电视剧，都是从一个show_id获取列表，
         # 所以db_media_type在这里用不上，但为了接口统一还是保留参数。
-        # 仅当请求完整列表时才使用缓存
-        # --- 新增：优先从搜索结果缓存中提取详细分集信息 ---
-        # 优酷的搜索API有时会直接返回分集列表，其中包含更完整的 displayName
-        search_cache_key = f"search_api_response_youku_{media_id}"
-        cached_search_data = await self._get_from_cache(search_cache_key)
 
-        if cached_search_data:
-            self.logger.info(f"Youku: 命中搜索结果缓存 (media_id={media_id})，尝试直接提取分集。")
-            try:
-                # 模拟搜索结果的嵌套结构来解析
-                page_component_list = cached_search_data.get("pageComponentList", [])
-                for component in page_component_list:
-                    episodes_data = component.get("componentMap", {}).get("1052", {}).get("data", [])
-                    if episodes_data:
-                        self.logger.info(f"Youku: 从缓存中成功提取到 {len(episodes_data)} 个原始分集。")
-                        # 直接使用这些数据，它们包含 displayName
-                        raw_episodes = [
-                            YoukuEpisodeInfo.model_validate(ep) for ep in episodes_data
-                        ]
-                        # 后续逻辑将处理过滤和编号
-                        break
-                else:
-                    raw_episodes = []
-
-                if raw_episodes:
-                    # 使用与下面相同的逻辑处理和返回
-                    final_episodes = await self._process_and_format_episodes(raw_episodes, target_episode_index)
-                    if target_episode_index:
-                        return [ep for ep in final_episodes if ep.episodeIndex == target_episode_index]
-                    return final_episodes
-
-            except Exception as e:
-                self.logger.warning(f"Youku: 从搜索缓存中提取分集失败: {e}，将回退到网络获取。")
-
-        # --- 缓存提取逻辑结束，如果失败则执行原有逻辑 ---
-
-        # 修正：缓存键应表示缓存的是原始数据
-        cache_key = f"episodes_raw_{media_id}"
-        
         raw_episodes: List[YoukuEpisodeInfo] = []
-
         # 仅当请求完整列表时才尝试从缓存获取
+        cache_key = f"episodes_raw_{media_id}"
         if target_episode_index is None:
             cached_episodes = await self._get_from_cache(cache_key)
             if cached_episodes is not None:
                 self.logger.info(f"Youku: 从缓存中命中原始分集列表 (media_id={media_id})")
                 raw_episodes = [YoukuEpisodeInfo.model_validate(e) for e in cached_episodes]
-
+        
         # 如果缓存未命中或不需要缓存，则从网络获取
         if not raw_episodes:
             self.logger.info(f"Youku: 缓存未命中或需要特定分集，正在为 media_id={media_id} 执行网络获取...")
@@ -385,18 +378,24 @@ class YoukuScraper(BaseScraper):
             if raw_episodes and target_episode_index is None:
                 await self._set_to_cache(cache_key, [e.model_dump() for e in raw_episodes], 'episodes_ttl_seconds', 1800)
 
-        final_episodes = await self._process_and_format_episodes(raw_episodes, target_episode_index)
+        final_episodes = await self._process_and_format_episodes(raw_episodes, target_episode_index, media_id)
 
         if target_episode_index:
             return [ep for ep in final_episodes if ep.episodeIndex == target_episode_index]
         return final_episodes
 
-    async def _process_and_format_episodes(self, raw_episodes: List[YoukuEpisodeInfo], target_episode_index: Optional[int]) -> List[models.ProviderEpisodeInfo]:
+    async def _process_and_format_episodes(self, raw_episodes: List[YoukuEpisodeInfo], target_episode_index: Optional[int], media_id: str) -> List[models.ProviderEpisodeInfo]:
         """
         一个集中的辅助函数，用于过滤、格式化和编号原始的优酷分集列表。
         """
+        # 获取媒体类型
+        media_type_cache_key = f"media_type_{media_id}"
+        media_type = await self._get_from_cache(media_type_cache_key) or 'variety'
+        
+        # 计算真实期数映射
+        stage_to_episode = self._calculate_episode_number_from_stage(raw_episodes)
+        
         # --- 关键修正：总是在获取数据后（无论来自缓存还是网络）应用过滤 ---
-        # 修正：Youku源只应使用其专属的黑名单，以避免全局规则误杀。
         provider_pattern_str = await self.config_manager.get(
             f"{self.provider_name}_episode_blacklist_regex", self._PROVIDER_SPECIFIC_BLACKLIST_DEFAULT
         )
@@ -419,20 +418,28 @@ class YoukuScraper(BaseScraper):
         else:
             filtered_episodes = raw_episodes
 
-        # 在过滤后的列表上重新编号
+        # 在过滤后的列表上重新编号，使用媒体类型格式化标题
         final_episodes = [
             models.ProviderEpisodeInfo(
                 provider=self.provider_name,
                 episodeId=ep.id.replace("=", "_"),
-                # 修正：优先使用清理后的 displayName，因为它通常包含最完整且最简洁的信息（如“第X期”），
-                # 如果 displayName 不存在，则回退到使用原始的 title。
-                title=(ep.clean_display_name or ep.title).strip(),
-                episodeIndex=i + 1, # 关键：使用过滤后列表的连续索引
+                title=self._format_episode_title(ep, i + 1, media_type, stage_to_episode),
+                episodeIndex=i + 1,
                 url=ep.link
             ) for i, ep in enumerate(filtered_episodes)
         ]
         
         return final_episodes
+
+    def _calculate_episode_number_from_stage(self, episodes: List[YoukuEpisodeInfo]) -> Dict[str, int]:
+        """根据stage字段计算真实的期数"""
+        stage_to_episode = {}
+        unique_stages = sorted(set(ep.stage for ep in episodes if ep.stage))
+        
+        for i, stage in enumerate(unique_stages, 1):
+            stage_to_episode[stage] = i
+        
+        return stage_to_episode
 
     async def _get_episodes_page(self, show_id: str, page: int, page_size: int) -> Optional[YoukuVideoResult]:
         client = await self._ensure_client()
@@ -671,3 +678,43 @@ class YoukuScraper(BaseScraper):
     def format_episode_id_for_comments(self, provider_episode_id: Any) -> str:
         """For Youku, the episode ID is a simple string, so no formatting is needed."""
         return str(provider_episode_id)
+
+    def _extract_media_type_from_response(self, common_data: YoukuSearchCommonData) -> str:
+        """从API响应中提取节目类型"""
+        # 优先使用 cats 字段
+        if common_data.cats:
+            cats = common_data.cats.lower()
+            if '综艺' in cats or 'variety' in cats:
+                return 'variety'
+            elif '电影' in cats or 'movie' in cats:
+                return 'movie'
+            elif '动漫' in cats or 'anime' in cats:
+                return 'anime'
+            elif '电视剧' in cats or 'drama' in cats:
+                return 'drama'
+        
+        # 备用：从 feature 字段提取
+        feature = common_data.feature.lower()
+        if '综艺' in feature:
+            return 'variety'
+        elif '电影' in feature:
+            return 'movie'
+        elif '动漫' in feature:
+            return 'anime'
+        elif '电视剧' in feature:
+            return 'drama'
+        
+        # 默认返回综艺
+        return 'variety'
+
+    def _format_episode_title(self, ep: YoukuEpisodeInfo, episode_index: int, media_type: str, stage_to_episode: Dict[str, int]) -> str:
+        """直接使用API返回的原始标题"""
+        return (ep.clean_display_name or ep.title).strip()
+
+
+
+
+
+
+
+
