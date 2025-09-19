@@ -12,6 +12,8 @@ on:
       - "beta"
     tags:
       - "v*.*.*"
+  release:
+    types: [published] # 当创建新release时触发
 
 jobs:
   build-and-push:
