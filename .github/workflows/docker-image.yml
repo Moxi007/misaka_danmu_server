@@ -2,14 +2,12 @@
 name: Publish to Docker Hub
 
 # 触发条件：
-# 1. 当推送到 'main' 分支时
-# 2. 当推送到 'test' 分支时
-# 3. 当推送到 'beta' 分支时
-# 4. 当创建 'v*.*.*' 格式的标签时
+# 1. 当推送到 'test' 分支时
+# 2. 当推送到 'beta' 分支时
+# 3. 当创建 'v*.*.*' 格式的标签时
 on:
   push:
     branches:
-      - "main"
       - "test"
       - "beta"
     tags:
@@ -30,12 +28,10 @@ jobs:
         id: prep
         run: |
           DOCKER_IMAGE=${{ secrets.DOCKERHUB_USERNAME }}/misaka_danmu_server
-          # 如果是推送到 main 分支
-          if [[ $GITHUB_REF == refs/heads/main ]]; then
-            # 设置输出: "user/repo:latest"
-            echo "tags=${DOCKER_IMAGE}:latest" >> $GITHUB_OUTPUT
+          # 默认构建所有平台
+          PLATFORMS="linux/amd64,linux/arm64"
           # 如果是标签推送 (e.g., v1.2.3)
-          elif [[ $GITHUB_REF == refs/tags/v* ]]; then
+          if [[ $GITHUB_REF == refs/tags/v* ]]; then
             # 从 ref 中提取标签名 (e.g., v1.2.3)
             TAG=${GITHUB_REF#refs/tags/}
             # 设置输出: "user/repo:v1.2.3,user/repo:latest"
@@ -75,3 +71,5 @@ jobs:
           platforms: ${{ steps.prep.outputs.platforms }}
           push: true
           tags: ${{ steps.prep.outputs.tags }}
+          secrets: |
+            XOR_KEY_SECRET=${{ secrets.XOR_KEY_SECRET }}
